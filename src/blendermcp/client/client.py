@@ -12,93 +12,179 @@ import traceback
 import websockets
 from typing import Any, Dict, Optional, Union, List, Type
 from pathlib import Path
+import jsonschema
 
 from .config import MCPConfig, ToolDefinition
 from .tools import ToolRegistry
 from .protocol.commands import *
+from .errors import (
+    MCPError, ErrorCategory, ErrorContent, create_error_response,
+    ValidationError, ConnectionError, ExecutionError, ResourceError,
+    PermissionError, TimeoutError, is_retriable_error
+)
+from .api_spec import (
+    API_VERSION, APICategory, APIEndpoint, ENDPOINTS,
+    get_endpoint, validate_version, get_deprecated_endpoints
+)
+from .connection import ConnectionPool
 
 logger = logging.getLogger(__name__)
 
 class BlenderMCPClient:
     """BlenderMCP client implementation"""
     
-    def __init__(self, config_path: Optional[str] = None):
+    def __init__(
+        self,
+        host: str = "localhost",
+        port: int = 9876,
+        max_connections: int = 10,
+        min_connections: int = 2,
+        config_path: Optional[str] = None
+    ):
         """Initialize the client
         
         Args:
-            config_path: Optional path to the configuration file
+            host: Server host
+            port: Server port
+            max_connections: Maximum number of connections
+            min_connections: Minimum number of connections
+            config_path: Path to configuration file
         """
-        # 加载配置
-        self.config = MCPConfig(config_path)
-        # 注册工具
+        self.host = host
+        self.port = port
+        self.config = MCPConfig(config_path) if config_path else MCPConfig()
         self.tool_registry = ToolRegistry(self.config)
-        # 设置连接参数
-        self.host = self.config.config.get("host", "localhost")
-        self.port = self.config.config.get("port", 9876)
-        self.websocket = None
+        self.api_version = API_VERSION
+        self.connection_pool = ConnectionPool(
+            host=host,
+            port=port,
+            max_size=max_connections,
+            min_size=min_connections
+        )
+        self._is_connected = False
+        self._setup_default_tools()
         
-    async def connect(self):
-        """Connect to the server"""
-        uri = f"ws://{self.host}:{self.port}"
+    def _setup_default_tools(self) -> None:
+        """设置默认工具"""
+        # 注册所有API端点作为工具
+        for endpoint in ENDPOINTS.values():
+            self.tool_registry.register_tool(ToolDefinition(
+                name=endpoint.name,
+                description=endpoint.description,
+                category=endpoint.category.value,
+                parameters=endpoint.input_schema,
+                handler=getattr(self, f"_handle_{endpoint.name}", None)
+            ))
+            
+    async def start(self):
+        """启动客户端"""
         try:
-            self.websocket = await websockets.connect(uri)
-            logger.info(f"Connected to {uri}")
+            await self.connection_pool.start()
+            self._is_connected = True
+            logger.info(f"客户端已启动: {self.host}:{self.port}")
         except Exception as e:
-            logger.error(f"Failed to connect to {uri}: {e}")
-            logger.error(f"错误堆栈: {traceback.format_exc()}")
+            logger.error(f"客户端启动失败: {e}")
             raise
-            
-    async def disconnect(self):
-        """Disconnect from the server"""
-        if self.websocket:
-            await self.websocket.close()
-            self.websocket = None
-            logger.info("Disconnected from server")
-            
-    async def send_command(self, command: str, params: Dict[str, Any] = None) -> Dict[str, Any]:
-        """Send a command to the server
         
-        Args:
-            command: Command name
-            params: Command parameters
-            
-        Returns:
-            Server response
-        """
-        if not self.websocket:
-            raise RuntimeError("Not connected to server")
-            
-        # 检查工具是否可用
-        tool = self.config.get_tool(command)
-        if tool and not self.config.is_tool_enabled(command):
-            raise RuntimeError(f"Tool {command} is disabled in configuration")
-            
-        command_id = str(uuid.uuid4())
-        message = {
-            "id": command_id,
-            "command": command,
-            "params": params or {}
-        }
-        
+    async def stop(self):
+        """停止客户端"""
         try:
-            logger.debug(f"发送命令: {message}")
-            await self.websocket.send(json.dumps(message))
-            response = await self.websocket.recv()
-            logger.debug(f"收到响应: {response}")
+            await self.connection_pool.stop()
+            self._is_connected = False
+            logger.info("客户端已停止")
+        except Exception as e:
+            logger.error(f"客户端停止失败: {e}")
+            raise
+        
+    async def _validate_request(self, endpoint_name: str, params: Dict[str, Any]) -> bool:
+        """验证API请求"""
+        endpoint = get_endpoint(endpoint_name)
+        if not endpoint:
+            raise ValidationError(f"未知的API端点: {endpoint_name}")
             
-            response_data = json.loads(response)
-            if response_data.get("error"):
-                error = response_data["error"]
-                logger.error(f"服务器返回错误: {error}")
-                raise RuntimeError(error.get("message", "Unknown error"))
+        if endpoint.deprecated:
+            logger.warning(f"API端点 {endpoint_name} 已废弃")
+            
+        if endpoint.input_schema:
+            try:
+                logger.debug(f"验证请求参数: endpoint={endpoint_name}, params={params}, schema={endpoint.input_schema}")
+                jsonschema.validate(instance=params, schema=endpoint.input_schema)
+                logger.debug("参数验证成功")
+                return True
+            except jsonschema.exceptions.ValidationError as e:
+                logger.error(f"参数验证失败: endpoint={endpoint_name}, params={params}, error={str(e)}")
+                raise ValidationError(f"参数验证失败: {str(e)}")
+        return True
+        
+    async def _handle_error(self, error: Exception, category: ErrorCategory) -> Dict[str, Any]:
+        """处理错误并返回标准错误响应"""
+        mcp_error = MCPError.from_exception(error, category)
+        
+        # 对于可重试的错误，尝试重试
+        if is_retriable_error(category) and mcp_error.retry_count < mcp_error.max_retries:
+            try:
+                mcp_error.retry_count += 1
+                logger.info(f"重试操作 (第{mcp_error.retry_count}次)")
+                # 这里可以添加重试逻辑
+                await asyncio.sleep(1)  # 简单的重试延迟
+                return {"retrying": True, "retry_count": mcp_error.retry_count}
+            except Exception as retry_error:
+                logger.error(f"重试失败: {retry_error}")
                 
-            return response_data.get("result", {})
-            
+        return mcp_error.to_dict()
+
+    async def _handle_set_material(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """处理设置材质请求"""
+        try:
+            response = await self._send_command("set_material", params)
+            if isinstance(response, dict) and response.get("isError"):
+                return response
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": f"材质设置成功: {response}"
+                }]
+            }
         except Exception as e:
-            logger.error(f"Error sending command {command}: {e}")
-            logger.error(f"错误堆栈: {traceback.format_exc()}")
-            raise
+            return await self._handle_error(e, ErrorCategory.EXECUTION)
+        
+    async def _send_command(self, command: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        """发送命令到服务器"""
+        try:
+            # 验证API请求
+            await self._validate_request(command, params)
             
+            # 获取连接
+            connection = await self.connection_pool.get_connection()
+            try:
+                message = {
+                    "command": command,
+                    "params": params,
+                    "version": self.api_version
+                }
+                
+                await connection.send(json.dumps(message))
+                response = await connection.recv()
+                return json.loads(response)
+            finally:
+                # 释放连接
+                await self.connection_pool.release_connection(connection)
+        except ValidationError as e:
+            return await self._handle_error(e, ErrorCategory.VALIDATION)
+        except asyncio.TimeoutError as e:
+            return await self._handle_error(e, ErrorCategory.TIMEOUT)
+        except Exception as e:
+            return await self._handle_error(e, ErrorCategory.EXECUTION)
+            
+    def get_connection_stats(self) -> Dict[str, int]:
+        """获取连接池统计信息"""
+        return self.connection_pool.get_stats()
+
+    def list_tools(self, category: Optional[str] = None) -> List[Dict[str, Any]]:
+        """列出可用工具"""
+        tools = self.tool_registry.list_tools(category)
+        return [tool.to_dict() for tool in tools]
+        
     def list_available_tools(self, category: Optional[str] = None) -> List[Dict[str, Any]]:
         """列出所有可用的工具
         
@@ -108,18 +194,18 @@ class BlenderMCPClient:
         Returns:
             工具列表，每个工具包含名称、描述和参数信息
         """
-        tools = self.config.list_tools(category)
+        tools = self.tool_registry.list_tools(category)
         return [{
             "name": tool.name,
             "description": tool.description,
             "category": tool.category,
             "parameters": tool.parameters,
-            "enabled": self.config.is_tool_enabled(tool.name)
+            "enabled": self.tool_registry.is_tool_enabled(tool.name)
         } for tool in tools]
         
     def get_tool_categories(self) -> List[str]:
         """获取所有工具类别"""
-        return self.config.get_tool_categories()
+        return self.tool_registry.get_tool_categories()
         
     # 高级材质操作
     async def create_node_material(
@@ -132,7 +218,7 @@ class BlenderMCPClient:
             "name": name,
             "node_setup": node_setup
         }
-        return await self.send_command("create_node_material", params)
+        return await self._send_command("create_node_material", params)
         
     # 高级灯光操作
     async def create_light(
@@ -156,7 +242,7 @@ class BlenderMCPClient:
             params["color"] = color
         if shadow is not None:
             params["shadow"] = shadow
-        return await self.send_command("create_light", params)
+        return await self._send_command("create_light", params)
         
     # 渲染操作
     async def set_render_settings(
@@ -175,7 +261,7 @@ class BlenderMCPClient:
             "resolution_y": resolution_y,
             "use_gpu": use_gpu
         }
-        return await self.send_command("set_render_settings", params)
+        return await self._send_command("set_render_settings", params)
         
     async def render_image(
         self,
@@ -189,7 +275,7 @@ class BlenderMCPClient:
             "format": format,
             "quality": quality
         }
-        return await self.send_command("render_image", params)
+        return await self._send_command("render_image", params)
         
     # 建模操作
     async def edit_mesh(
@@ -204,7 +290,7 @@ class BlenderMCPClient:
             "operation": operation,
             "parameters": parameters
         }
-        return await self.send_command("edit_mesh", params)
+        return await self._send_command("edit_mesh", params)
         
     async def add_modifier(
         self,
@@ -218,7 +304,7 @@ class BlenderMCPClient:
             "modifier_type": modifier_type,
             "parameters": parameters
         }
-        return await self.send_command("add_modifier", params)
+        return await self._send_command("add_modifier", params)
         
     # 动画操作
     async def create_animation(
@@ -233,7 +319,7 @@ class BlenderMCPClient:
             "property_path": property_path,
             "keyframes": keyframes
         }
-        return await self.send_command("create_animation", params)
+        return await self._send_command("create_animation", params)
         
     async def setup_physics(
         self,
@@ -247,47 +333,64 @@ class BlenderMCPClient:
             "physics_type": physics_type,
             "parameters": parameters
         }
-        return await self.send_command("setup_physics", params)
+        return await self._send_command("setup_physics", params)
 
     # 场景操作
     async def get_scene_info(self) -> Dict[str, Any]:
-        """Get information about the current scene"""
-        logger.info("获取场景信息")
-        return await self.send_command(GET_SCENE_INFO)
+        """获取场景信息"""
+        return await self._send_command("get_scene_info", {})
     
     # 对象操作
     async def create_object(
         self,
-        type: str,
-        name: Optional[str] = None,
+        object_type: str,
+        object_name: Optional[str] = None,
         location: Optional[List[float]] = None,
         rotation: Optional[List[float]] = None,
         scale: Optional[List[float]] = None
     ) -> Dict[str, Any]:
-        """Create a new object in the scene"""
-        logger.info(f"创建对象: type={type}, name={name}")
-        params = {
-            PARAM_TYPE: type
-        }
-        if name:
-            params[PARAM_NAME] = name
+        """创建对象
+        
+        Args:
+            object_type: 对象类型 (MESH, CURVE, LIGHT, CAMERA)
+            object_name: 对象名称
+            location: 位置坐标 [x, y, z]
+            rotation: 旋转角度 [x, y, z]
+            scale: 缩放比例 [x, y, z]
+            
+        Returns:
+            包含创建结果的字典
+        """
+        params = {"object_type": object_type}
+        if object_name:
+            params["object_name"] = object_name
         if location:
-            params[PARAM_LOCATION] = location
+            params["location"] = location
         if rotation:
-            params[PARAM_ROTATION] = rotation
+            params["rotation"] = rotation
         if scale:
-            params[PARAM_SCALE] = scale
-        return await self.send_command(CREATE_OBJECT, params)
+            params["scale"] = scale
+            
+        result = await self._send_command("create_object", params)
+        logger.debug(f"创建对象结果: {result}")
+        if "result" in result and "name" in result["result"]:
+            return result
+        return result
     
-    async def delete_object(self, name: str) -> Dict[str, Any]:
-        """Delete an object from the scene"""
-        logger.info(f"删除对象: {name}")
-        return await self.send_command(DELETE_OBJECT, {PARAM_NAME: name})
+    async def delete_object(self, object_name: str) -> Dict[str, Any]:
+        """删除对象"""
+        params = {"object_name": object_name}
+        return await self._send_command("delete_object", params)
     
-    async def get_object_info(self, name: str) -> Dict[str, Any]:
-        """Get information about an object"""
-        logger.info(f"获取对象信息: {name}")
-        return await self.send_command(GET_OBJECT_INFO, {PARAM_NAME: name})
+    async def get_object_info(self, object_name: str) -> Dict[str, Any]:
+        """获取对象信息"""
+        try:
+            if not object_name:
+                raise ValidationError("对象名称不能为空")
+            params = {"object_name": object_name}
+            return await self._send_command("get_object_info", params)
+        except Exception as e:
+            return await self._handle_error(e, ErrorCategory.VALIDATION)
     
     # 材质操作
     async def set_material(
@@ -296,14 +399,23 @@ class BlenderMCPClient:
         material_name: Optional[str] = None,
         color: Optional[List[float]] = None
     ) -> Dict[str, Any]:
-        """Set or create a material for an object"""
-        logger.info(f"设置材质: object={object_name}, material={material_name}")
-        params = {"object": object_name}
-        if material_name:
-            params["material"] = material_name
-        if color:
-            params[PARAM_COLOR] = color
-        return await self.send_command(SET_MATERIAL, params)
+        """设置对象材质"""
+        try:
+            params = {"object_name": object_name}
+            if material_name:
+                params["material_name"] = material_name
+            if color:
+                params["color"] = color
+                
+            # 验证参数
+            if not object_name:
+                raise ValidationError("对象名称不能为空")
+            if color and (len(color) != 4 or not all(isinstance(x, (int, float)) for x in color)):
+                raise ValidationError("颜色必须是包含4个数字的列表(RGBA)")
+                
+            return await self._handle_set_material(params)
+        except Exception as e:
+            return await self._handle_error(e, ErrorCategory.EXECUTION)
     
     async def set_texture(
         self,
@@ -316,4 +428,50 @@ class BlenderMCPClient:
             PARAM_NAME: object_name,
             PARAM_TEXTURE_ID: texture_id
         }
-        return await self.send_command(SET_TEXTURE, params) 
+        return await self._send_command(SET_TEXTURE, params)
+
+    # API端点处理方法
+    async def _handle_create_object(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """处理创建对象请求"""
+        try:
+            response = await self._send_command("create_object", params)
+            if isinstance(response, dict) and response.get("isError"):
+                return response
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": f"对象创建成功: {response}"
+                }]
+            }
+        except Exception as e:
+            return await self._handle_error(e, ErrorCategory.EXECUTION)
+            
+    async def _handle_create_light(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """处理创建灯光请求"""
+        try:
+            response = await self._send_command("create_light", params)
+            if isinstance(response, dict) and response.get("isError"):
+                return response
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": f"灯光创建成功: {response}"
+                }]
+            }
+        except Exception as e:
+            return await self._handle_error(e, ErrorCategory.EXECUTION)
+            
+    async def _handle_render_image(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """处理渲染图像请求"""
+        try:
+            response = await self._send_command("render_image", params)
+            if isinstance(response, dict) and response.get("isError"):
+                return response
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": f"图像渲染成功: {response}"
+                }]
+            }
+        except Exception as e:
+            return await self._handle_error(e, ErrorCategory.EXECUTION) 

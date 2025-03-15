@@ -61,6 +61,8 @@ def get_object_name(response):
             return None
             
         if "result" in response and isinstance(response["result"], dict):
+            if "object_name" in response["result"]:
+                return response["result"]["object_name"]
             if "name" in response["result"]:
                 return response["result"]["name"]
             if "object" in response["result"]:
@@ -76,16 +78,17 @@ async def create_chess_board(client: BlenderMCPClient):
     """创建棋盘"""
     # 创建棋盘底座
     board_base = await client.create_object(
-        type="CUBE",
-        name="chess_board",
+        object_type="MESH",
+        object_name="chess_board",
         location=[0, 0, -0.1],
         scale=[4, 4, 0.2]
     )
+    board_name = get_object_name(board_base)
     logger.info(f"创建棋盘底座: {board_base}")
     
     # 为棋盘底座设置木质材质
     await client.set_material(
-        object_name=board_base["name"],
+        object_name=board_name,
         material_name="board_wood",
         color=[0.4, 0.2, 0.1, 1.0]  # 使用列表而不是元组
     )
@@ -102,17 +105,18 @@ async def create_chess_board(client: BlenderMCPClient):
             
             # 创建格子
             square = await client.create_object(
-                type="CUBE",
-                name=f"square_{i}_{j}",
+                object_type="MESH",
+                object_name=f"square_{i}_{j}",
                 location=[x, y, 0],
                 scale=[0.25, 0.25, 0.01]
             )
+            square_name = get_object_name(square)
             logger.info(f"创建棋盘格 {i},{j}: {square}")
             
             # 设置材质
             material_name = f"{'white' if is_white else 'black'}_square"
             await client.set_material(
-                object_name=square["name"],
+                object_name=square_name,
                 material_name=material_name,
                 color=color
             )
@@ -134,28 +138,28 @@ async def create_chess_piece(client: BlenderMCPClient, piece_type: str, is_white
     
     # 根据棋子类型设置不同的形状和大小
     piece_params = {
-        "pawn": {"type": "CYLINDER", "height": 0.3, "scale": [0.1, 0.1, 0.3]},
-        "rook": {"type": "CUBE", "height": 0.4, "scale": [0.15, 0.15, 0.4]},
-        "knight": {"type": "CONE", "height": 0.4, "scale": [0.12, 0.12, 0.4]},
-        "bishop": {"type": "CONE", "height": 0.5, "scale": [0.12, 0.12, 0.5]},
-        "queen": {"type": "CYLINDER", "height": 0.6, "scale": [0.15, 0.15, 0.6]},
-        "king": {"type": "CYLINDER", "height": 0.7, "scale": [0.15, 0.15, 0.7]}
+        "pawn": {"object_type": "MESH", "height": 0.3, "scale": [0.1, 0.1, 0.3]},
+        "rook": {"object_type": "MESH", "height": 0.4, "scale": [0.15, 0.15, 0.4]},
+        "knight": {"object_type": "MESH", "height": 0.4, "scale": [0.12, 0.12, 0.4]},
+        "bishop": {"object_type": "MESH", "height": 0.5, "scale": [0.12, 0.12, 0.5]},
+        "queen": {"object_type": "MESH", "height": 0.6, "scale": [0.15, 0.15, 0.6]},
+        "king": {"object_type": "MESH", "height": 0.7, "scale": [0.15, 0.15, 0.7]}
     }
     
     params = piece_params[piece_type]
     piece = await client.create_object(
-        type=params["type"],
-        name=f"{side}_{piece_type}_{position[0]}_{position[1]}",
+        object_type=params["object_type"],
+        object_name=f"{side}_{piece_type}_{position[0]}_{position[1]}",
         location=[x, y, params["height"]],
         scale=params["scale"]
     )
-    
+    piece_name = get_object_name(piece)
     logger.info(f"创建{side} {piece_type}: {piece}")
     
     # 设置材质，只使用基本参数
     material_name = f"{side}_{piece_type}_material"
     await client.set_material(
-        object_name=piece["name"],
+        object_name=piece_name,
         material_name=material_name,
         color=color
     )
@@ -165,7 +169,7 @@ async def create_chess_set():
     try:
         # 连接到Blender
         client = BlenderMCPClient()
-        await client.connect()
+        await client.start()
         logger.info("已连接到Blender")
         
         # 清除现有场景中的对象（可选）
@@ -198,17 +202,17 @@ async def create_chess_set():
         # 设置相机和灯光
         # 添加日光
         await client.create_object(
-            type="LIGHT",
-            name="Sun",
+            object_type="LIGHT",
+            object_name="Sun",
             location=[5, 5, 10],
             rotation=[0.9, 0, 0.8]
         )
-        await client.send_command("set_light_type", {"name": "Sun", "light_type": "SUN"})
-        await client.send_command("set_light_energy", {"name": "Sun", "energy": 3.0})
+        await client._send_command("set_light_type", {"object_name": "Sun", "light_type": "SUN"})
+        await client._send_command("set_light_energy", {"object_name": "Sun", "energy": 3.0})
         
         # 添加区域光源
-        await client.send_command("advanced_lighting", {
-            "name": "Chess_Light",
+        await client._send_command("advanced_lighting", {
+            "object_name": "Chess_Light",
             "light_type": "AREA",
             "location": [0, 0, 5],
             "energy": 50,
@@ -217,12 +221,12 @@ async def create_chess_set():
         
         # 设置相机
         camera = await client.create_object(
-            type="CAMERA",
-            name="ChessCamera",
+            object_type="CAMERA",
+            object_name="ChessCamera",
             location=[8, -6, 6],
             rotation=[0.9, 0, 0.8]
         )
-        await client.send_command("set_active_camera", {"name": camera["name"]})
+        await client._send_command("set_active_camera", {"object_name": camera["result"]["object_name"]})
         
         logger.info("国际象棋套装创建完成")
         
@@ -230,7 +234,7 @@ async def create_chess_set():
         logger.error(f"创建国际象棋套装时出错: {e}")
         logger.error(traceback.format_exc())
     finally:
-        await client.disconnect()
+        await client.stop()
         logger.info("已断开与Blender的连接")
 
 if __name__ == "__main__":
