@@ -264,6 +264,42 @@ def install_addon(blender_version):
             else:
                 shutil.copy2(src, dst)
         
+        # 从 addon/__init__.py 复制 bl_info 到插件根目录的 __init__.py
+        addon_init = os.path.join(source_path, "addon", "__init__.py")
+        root_init = os.path.join(install_path, "__init__.py")
+        
+        if os.path.exists(addon_init):
+            with open(addon_init, 'r', encoding='utf-8') as f:
+                content = f.read()
+                
+            # 提取 bl_info
+            import re
+            bl_info_match = re.search(r'bl_info\s*=\s*{[^}]+}', content, re.DOTALL)
+            if bl_info_match:
+                bl_info = bl_info_match.group(0)
+                
+                # 创建新的 __init__.py
+                init_content = f'''"""
+BlenderMCP Plugin
+"""
+
+{bl_info}
+
+import os
+import sys
+
+# 添加当前目录到 Python 路径
+if __path__[0] not in sys.path:
+    sys.path.insert(0, __path__[0])
+
+from .addon import register, unregister
+
+if __name__ == "__main__":
+    register()
+'''
+                with open(root_init, 'w', encoding='utf-8') as f:
+                    f.write(init_content)
+        
         # 安装依赖
         temp_dir = install_dependencies_to_temp()
         if temp_dir:

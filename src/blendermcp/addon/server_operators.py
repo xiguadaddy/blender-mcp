@@ -3,6 +3,8 @@ BlenderMCP Server Operators
 """
 
 import bpy
+import asyncio
+import threading
 import logging
 from bpy.types import Operator
 from ..server.server import BlenderMCPServer
@@ -12,7 +14,20 @@ logger = logging.getLogger(__name__)
 
 # 全局变量
 server = None
-is_server_running = False  # 新增：服务器状态标志
+server_thread = None
+is_server_running = False
+
+def run_server_in_thread(server_instance):
+    """在单独的线程中运行服务器"""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    try:
+        loop.run_until_complete(server_instance.start())
+    except Exception as e:
+        logger.error(f"服务器运行错误: {e}")
+    finally:
+        loop.close()
 
 class BLENDERMCP_OT_start_server(Operator):
     """启动 BlenderMCP 服务器"""
@@ -21,7 +36,7 @@ class BLENDERMCP_OT_start_server(Operator):
     bl_description = "Start the BlenderMCP server"
     
     def execute(self, context):
-        global server, is_server_running
+        global server, server_thread, is_server_running
         try:
             if is_server_running:
                 self.report({'WARNING'}, "服务器已经在运行中")
@@ -32,12 +47,21 @@ class BLENDERMCP_OT_start_server(Operator):
             port = prefs.port
             
             server = BlenderMCPServer(host=host, port=port)
-            server.start()
-            is_server_running = True  # 更新状态
             # 注册命令处理器
             register_handlers(server)
+            
+            # 在新线程中启动服务器
+            server_thread = threading.Thread(
+                target=run_server_in_thread,
+                args=(server,),
+                daemon=True
+            )
+            server_thread.start()
+            
+            is_server_running = True
             self.report({'INFO'}, f"服务器已启动于 {host}:{port}")
             return {'FINISHED'}
+            
         except Exception as e:
             logger.error(f"启动服务器失败: {e}")
             self.report({'ERROR'}, f"启动服务器失败: {str(e)}")
@@ -50,16 +74,24 @@ class BLENDERMCP_OT_stop_server(Operator):
     bl_description = "Stop the BlenderMCP server"
     
     def execute(self, context):
-        global server, is_server_running
+        global server, server_thread, is_server_running
         try:
             if not is_server_running:
                 self.report({'WARNING'}, "服务器未在运行")
                 return {'CANCELLED'}
                 
             if server:
-                server.stop()
+                # 创建一个事件循环来停止服务器
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    loop.run_until_complete(server.stop())
+                finally:
+                    loop.close()
+                
                 server = None
-                is_server_running = False  # 更新状态
+                server_thread = None
+                is_server_running = False
                 self.report({'INFO'}, "服务器已停止")
             return {'FINISHED'}
         except Exception as e:

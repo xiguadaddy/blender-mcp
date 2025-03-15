@@ -5,21 +5,42 @@ Basic operations test for BlenderMCP
 import asyncio
 import logging
 import json
+import time
 from blendermcp.client.client import BlenderMCPClient
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+async def wait_for_server(client: BlenderMCPClient, max_attempts: int = 5, delay: float = 2.0) -> bool:
+    """等待服务器启动"""
+    for attempt in range(max_attempts):
+        try:
+            logger.info(f"尝试连接服务器 (尝试 {attempt + 1}/{max_attempts})")
+            await client.connect()
+            logger.info("成功连接到服务器")
+            return True
+        except Exception as e:
+            if attempt < max_attempts - 1:
+                logger.warning(f"连接失败: {e}，将在 {delay} 秒后重试")
+                await asyncio.sleep(delay)
+            else:
+                logger.error(f"连接失败: {e}，已达到最大重试次数")
+                return False
+    return False
+
 async def test_connection(client: BlenderMCPClient) -> bool:
     """测试服务器连接"""
     try:
-        await client.connect()
+        if not await wait_for_server(client):
+            logger.error("无法连接到服务器。请确保在 Blender 中启动了服务器")
+            return False
+            
         scene_info = await client.get_scene_info()
-        logger.info(f"Scene info: {json.dumps(scene_info, indent=2)}")
+        logger.info(f"场景信息: {json.dumps(scene_info, indent=2)}")
         return True
     except Exception as e:
-        logger.error(f"Connection test failed: {e}")
+        logger.error(f"连接测试失败: {e}")
         return False
 
 async def test_object_creation(client: BlenderMCPClient) -> bool:
