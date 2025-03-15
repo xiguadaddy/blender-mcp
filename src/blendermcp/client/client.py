@@ -7,6 +7,8 @@ This module implements the client for connecting to a BlenderMCP server.
 import json
 import asyncio
 import logging
+import uuid
+import traceback
 import websockets
 from typing import Any, Dict, Optional, Union, List
 
@@ -36,6 +38,7 @@ class BlenderMCPClient:
             logger.info(f"Connected to {uri}")
         except Exception as e:
             logger.error(f"Failed to connect to {uri}: {e}")
+            logger.error(f"错误堆栈: {traceback.format_exc()}")
             raise
             
     async def disconnect(self):
@@ -58,22 +61,36 @@ class BlenderMCPClient:
         if not self.websocket:
             raise RuntimeError("Not connected to server")
             
+        command_id = str(uuid.uuid4())
         message = {
+            "id": command_id,
             "command": command,
             "params": params or {}
         }
         
         try:
+            logger.debug(f"发送命令: {message}")
             await self.websocket.send(json.dumps(message))
             response = await self.websocket.recv()
-            return json.loads(response)
+            logger.debug(f"收到响应: {response}")
+            
+            response_data = json.loads(response)
+            if response_data.get("error"):
+                error = response_data["error"]
+                logger.error(f"服务器返回错误: {error}")
+                raise RuntimeError(error.get("message", "Unknown error"))
+                
+            return response_data.get("result", {})
+            
         except Exception as e:
             logger.error(f"Error sending command {command}: {e}")
+            logger.error(f"错误堆栈: {traceback.format_exc()}")
             raise
             
     # 场景操作
     async def get_scene_info(self) -> Dict[str, Any]:
         """Get information about the current scene"""
+        logger.info("获取场景信息")
         return await self.send_command(GET_SCENE_INFO)
     
     # 对象操作
@@ -86,6 +103,7 @@ class BlenderMCPClient:
         scale: Optional[List[float]] = None
     ) -> Dict[str, Any]:
         """Create a new object in the scene"""
+        logger.info(f"创建对象: type={type}, name={name}")
         params = {
             PARAM_TYPE: type
         }
@@ -101,10 +119,12 @@ class BlenderMCPClient:
     
     async def delete_object(self, name: str) -> Dict[str, Any]:
         """Delete an object from the scene"""
+        logger.info(f"删除对象: {name}")
         return await self.send_command(DELETE_OBJECT, {PARAM_NAME: name})
     
     async def get_object_info(self, name: str) -> Dict[str, Any]:
         """Get information about an object"""
+        logger.info(f"获取对象信息: {name}")
         return await self.send_command(GET_OBJECT_INFO, {PARAM_NAME: name})
     
     # 材质操作
@@ -115,9 +135,10 @@ class BlenderMCPClient:
         color: Optional[List[float]] = None
     ) -> Dict[str, Any]:
         """Set or create a material for an object"""
-        params = {PARAM_NAME: object_name}
+        logger.info(f"设置材质: object={object_name}, material={material_name}")
+        params = {"object": object_name}
         if material_name:
-            params[PARAM_MATERIAL_NAME] = material_name
+            params["material"] = material_name
         if color:
             params[PARAM_COLOR] = color
         return await self.send_command(SET_MATERIAL, params)
@@ -128,6 +149,7 @@ class BlenderMCPClient:
         texture_id: str
     ) -> Dict[str, Any]:
         """Apply a texture to an object"""
+        logger.info(f"设置纹理: object={object_name}, texture={texture_id}")
         params = {
             PARAM_NAME: object_name,
             PARAM_TEXTURE_ID: texture_id

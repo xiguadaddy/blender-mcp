@@ -3,7 +3,7 @@ name = "blendermcp"
 version = "0.1.0"
 description = "BlenderMCP - Blender Multi-Client Protocol"
 authors = [
-    { name = "Your Name", email = "your.email@example.com" }
+    { name = "xiguadaddy", email = "kangdong303@gmail.com" }
 ]
 dependencies = [
     "websockets>=10.0",
@@ -15,7 +15,7 @@ readme = "README.md"
 license = { text = "MIT" }
 
 [project.urls]
-Homepage = "https://github.com/yourusername/blendermcp"
+Homepage = "https://github.com/xiguadaddy/blender-mcp.git"
 
 [build-system]
 requires = ["hatchling"]

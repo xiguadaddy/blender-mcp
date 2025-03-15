@@ -68,25 +68,25 @@ def get_object_name(response):
 
 def create_chess_set():
     """创建国际象棋棋盘和棋子"""
-    # 创建客户端
-    client = BlenderMCPClient()
-    if not client.connect():
-        print("无法连接到BlenderMCP服务器")
-        sys.exit(1)
-        
-    try:
+# 创建客户端
+client = BlenderMCPClient()
+if not client.connect():
+    print("无法连接到BlenderMCP服务器")
+    sys.exit(1)
+
+try:
         # 测试服务器连接
         ping_response = client.ping()
         debug_print(f"服务器Ping响应: {json.dumps(ping_response, ensure_ascii=False)}")
-        
-        # 清除现有场景
+    
+    # 清除现有场景
         debug_print("清除现有场景...")
-        scene_info = client.get_scene_info()
-        if "result" in scene_info and "objects" in scene_info["result"]:
-            for obj in scene_info["result"]["objects"]:
+    scene_info = client.get_scene_info()
+    if "result" in scene_info and "objects" in scene_info["result"]:
+        for obj in scene_info["result"]["objects"]:
                 if obj.get("name") != "Camera":  # 保留相机
-                    client.delete_object(obj["name"])
-        
+            client.delete_object(obj["name"])
+    
         # 1. 创建棋盘底座
         debug_print("创建棋盘底座...")
         board_response = client.create_object("CUBE", name="棋盘", 
@@ -147,8 +147,8 @@ def create_chess_set():
                     # 使用预期的名称继续而不跳过
                     square_obj_name = square_name
                     print(f"注意：无法获取格子名称，使用默认名称 '{square_obj_name}' 继续")
-                
-                # 设置材质
+        
+        # 设置材质
                 client.set_material(square_obj_name, color=color)
                 squares.append(square_obj_name)
         
