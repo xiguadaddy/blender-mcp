@@ -1,92 +1,82 @@
 """
-BlenderMCP UI Panels
+BlenderMCP面板模块
 
-This module implements the UI panels for the BlenderMCP addon.
+该模块提供了BlenderMCP的用户界面面板。
 """
 
 import bpy
-from bpy.types import Panel
+from . import server_operators
 
-class VIEW3D_PT_blendermcp_operations(Panel):
-    """Operations panel for BlenderMCP"""
-    bl_label = "Operations"
-    bl_idname = "VIEW3D_PT_blendermcp_operations"
+class MCP_PT_Panel(bpy.types.Panel):
+    """MCP主面板"""
+    bl_label = "MCP服务器"
+    bl_idname = "MCP_PT_Panel"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'BlenderMCP'
-    bl_options = {'DEFAULT_CLOSED'}
-
+    bl_category = 'MCP'
+    
     def draw(self, context):
-        """Draw the panel"""
         layout = self.layout
+        preferences = context.preferences.addons["blendermcp"].preferences
         
-        # 服务器控制按钮
+        # 服务器状态
         box = layout.box()
-        box.label(text="Server Control:")
         row = box.row()
-        row.operator("blendermcp.start_server", text="Start Server")
-        row.operator("blendermcp.stop_server", text="Stop Server")
         
-        # 命令执行状态
-        box = layout.box()
-        box.label(text="Last Command:")
-        row = box.row()
-        row.label(text=context.scene.blendermcp.last_command or "None")
-        
-        # 命令结果
-        box = layout.box()
-        box.label(text="Result:")
-        row = box.row()
-        if context.scene.blendermcp.last_result_success:
-            row.label(text="Success", icon='CHECKMARK')
-        else:
-            row.label(text="Failed", icon='ERROR')
-        row = box.row()
-        row.label(text=context.scene.blendermcp.last_result or "No result")
-
-class VIEW3D_PT_blendermcp_log(Panel):
-    """Log panel for BlenderMCP"""
-    bl_label = "Log"
-    bl_idname = "VIEW3D_PT_blendermcp_log"
-    bl_space_type = 'VIEW_3D'
-    bl_region_type = 'UI'
-    bl_category = 'BlenderMCP'
-    bl_options = {'DEFAULT_CLOSED'}
-
-    def draw(self, context):
-        """Draw the panel"""
-        layout = self.layout
-        
-        # 日志显示
-        box = layout.box()
-        for log in context.scene.blendermcp.logs:
-            row = box.row()
-            if log.level == 'INFO':
-                icon = 'INFO'
-            elif log.level == 'WARNING':
-                icon = 'ERROR'
-            elif log.level == 'ERROR':
-                icon = 'CANCEL'
+        if server_operators.is_server_running():
+            row.label(text="状态: 运行中", icon='CHECKMARK')
+            
+            # 显示服务器模式
+            mode = preferences.server_mode.lower()
+            if mode == "websocket":
+                row = box.row()
+                row.label(text=f"模式: WebSocket")
+                
+                # 显示WebSocket URL
+                url = server_operators.get_server_url()
+                if url:
+                    row = box.row()
+                    row.label(text=f"URL: {url}")
+                    
+                    # 复制URL按钮
+                    row = box.row()
+                    row.operator("mcp.copy_websocket_url", text="复制URL", icon='COPYDOWN')
             else:
-                icon = 'NONE'
-            row.label(text=log.message, icon=icon)
+                row = box.row()
+                row.label(text=f"模式: 标准输入/输出")
+            
+            # 停止服务器按钮
+            row = box.row()
+            row.operator("mcp.stop_server", text="停止服务器", icon='PAUSE')
+        else:
+            row.label(text="状态: 已停止", icon='X')
+            
+            # 启动服务器按钮
+            row = box.row()
+            row.operator("mcp.start_server", text="启动服务器", icon='PLAY')
         
-        # 清除日志按钮
-        row = layout.row()
-        row.operator("blendermcp.clear_log", text="Clear Log")
+        # 服务器设置
+        box = layout.box()
+        box.label(text="服务器设置:")
+        
+        # 服务器模式
+        row = box.row()
+        row.prop(preferences, "server_mode", text="模式")
+        
+        # WebSocket设置
+        if preferences.server_mode.lower() == "websocket":
+            row = box.row()
+            row.prop(preferences, "server_host", text="主机")
+            
+            row = box.row()
+            row.prop(preferences, "server_port", text="端口")
+        
+        # 自动启动设置
+        row = box.row()
+        row.prop(preferences, "auto_start", text="自动启动")
 
-# 要注册的类
-classes = (
-    VIEW3D_PT_blendermcp_operations,
-    VIEW3D_PT_blendermcp_log,
-)
+def register():
+    bpy.utils.register_class(MCP_PT_Panel)
 
-def register_panels():
-    """注册所有面板类"""
-    for cls in classes:
-        bpy.utils.register_class(cls)
-
-def unregister_panels():
-    """注销所有面板类"""
-    for cls in reversed(classes):
-        bpy.utils.unregister_class(cls) 
+def unregister():
+    bpy.utils.unregister_class(MCP_PT_Panel) 

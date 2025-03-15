@@ -12,6 +12,7 @@ import traceback
 import threading
 from typing import Dict, Any, Optional, Callable, Awaitable, Union, Coroutine
 from ...common.errors import BlenderError, ParameterError
+from ..api_spec import create_response, create_error, ERROR_CODES, STANDARD_PARAMS
 
 logger = logging.getLogger(__name__)
 
@@ -107,11 +108,25 @@ class BlenderCommandHandler:
         
     @staticmethod
     async def create_object(params: Dict[str, Any]) -> Dict[str, Any]:
-        """Create a new object in Blender"""
+        """创建新对象
+        
+        Args:
+            params: 命令参数
+                - object_type: 对象类型
+                - object_name: 对象名称 (可选)
+                - location: 位置 [x, y, z] (可选)
+                - rotation: 旋转 [x, y, z] (可选)
+                - scale: 缩放 [x, y, z] (可选)
+                
+        Returns:
+            Dict[str, Any]: 创建结果
+        """
         try:
             logger.info(f"开始创建对象，参数: {params}")
+            
             # 验证参数
-            obj_type = params.get('object_type', 'MESH').upper()  # 使用object_type而不是type
+            obj_type = params.get('object_type', 'MESH').upper()
+            
             # 创建对象类型映射
             type_mapping = {
                 'CUBE': 'MESH',
@@ -125,7 +140,7 @@ class BlenderCommandHandler:
             }
             
             if obj_type not in type_mapping:
-                raise ParameterError(f"Invalid object type: {obj_type}")
+                raise ParameterError(f"无效的对象类型: {obj_type}")
                 
             object_name = params.get('object_name')
             location = params.get('location', (0, 0, 0))
@@ -187,41 +202,59 @@ class BlenderCommandHandler:
                     obj.name = object_name
                     
                 return {
-                    'object_name': obj.name,
-                    'type': obj.type,
-                    'location': tuple(obj.location),
-                    'rotation': tuple(obj.rotation_euler),
-                    'scale': tuple(obj.scale)
+                    'object': {
+                        'object_name': obj.name,
+                        'object_type': obj.type,
+                        'location': tuple(obj.location),
+                        'rotation': tuple(obj.rotation_euler),
+                        'scale': tuple(obj.scale)
+                    }
                 }
             
-            # 在Blender主线程中执行
             return await run_in_blender(create_object_sync)
             
         except Exception as e:
-            logger.exception("Error creating object")
+            logger.error(f"创建对象失败: {e}")
+            logger.error(f"错误堆栈: {traceback.format_exc()}")
             raise BlenderError(str(e))
             
     @staticmethod
     async def delete_object(params: Dict[str, Any]) -> Dict[str, Any]:
-        """Delete an object from Blender"""
+        """删除对象
+        
+        Args:
+            params: 命令参数
+                - object_name: 对象名称
+                
+        Returns:
+            Dict[str, Any]: 删除结果
+        """
         try:
             logger.info(f"开始删除对象，参数: {params}")
-            object_name = params.get('object_name')
-            if not object_name:
-                raise ParameterError("Object name is required")
+            
+            if 'object_name' not in params:
+                raise ParameterError("缺少必需的'object_name'参数")
+            
+            object_name = params['object_name']
+            if not isinstance(object_name, str):
+                raise ParameterError("'object_name'参数必须是字符串类型")
                 
             def delete_object_sync():
                 obj = bpy.data.objects.get(object_name)
                 if not obj:
-                    raise BlenderError(f"Object not found: {object_name}")
+                    raise BlenderError(f"对象不存在: {object_name}")
                     
                 bpy.data.objects.remove(obj, do_unlink=True)
-                return {'status': 'success', 'message': f'Object {object_name} deleted'}
+                return {
+                    'object_name': object_name,
+                    'status': 'deleted'
+                }
                 
             return await run_in_blender(delete_object_sync)
             
         except Exception as e:
-            logger.exception("Error deleting object")
+            logger.error(f"删除对象失败: {e}")
+            logger.error(f"错误堆栈: {traceback.format_exc()}")
             raise BlenderError(str(e))
             
     @staticmethod
@@ -231,14 +264,22 @@ class BlenderCommandHandler:
         Args:
             params: 命令参数
                 - object_name: 对象名称
-                - material: 材质名称 (可选)
+                - material_name: 材质名称 (可选)
                 - color: 颜色值 [R,G,B,A] (可选，默认 [0.8,0.8,0.8,1.0])
                 - metallic: 金属度 (可选，默认 0.0)
                 - roughness: 粗糙度 (可选，默认 0.4)
                 - specular: 镜面反射强度 (可选，默认 0.5)
                 
         Returns:
-            Dict[str, Any]: 设置结果
+            Dict[str, Any]: 设置结果，包含:
+                - material: 材质信息
+                    - material_name: 材质名称
+                    - properties: 材质属性
+                        - color: 颜色值
+                        - metallic: 金属度
+                        - roughness: 粗糙度
+                        - specular: 镜面反射强度
+                - object_name: 对象名称
         """
         try:
             logger.info(f"开始设置材质，参数: {params}")
@@ -252,9 +293,9 @@ class BlenderCommandHandler:
                 raise ParameterError("'object_name'参数必须是字符串类型")
                 
             # 验证可选参数
-            material_name = params.get('material')
+            material_name = params.get('material_name')
             if material_name is not None and not isinstance(material_name, str):
-                raise ParameterError("'material'参数必须是字符串类型")
+                raise ParameterError("'material_name'参数必须是字符串类型")
                 
             color_value = params.get('color', [0.8, 0.8, 0.8, 1.0])
             if not isinstance(color_value, (list, tuple)):
@@ -343,15 +384,16 @@ class BlenderCommandHandler:
                             slot.material = mat
                             
                     return {
-                        'success': True,
-                        'material_name': mat.name,
-                        'object_name': obj_name,
-                        'properties': {
-                            'color': color_value,
-                            'metallic': metallic,
-                            'roughness': roughness,
-                            'specular': specular
-                        }
+                        'material': {
+                            'material_name': mat.name,
+                            'properties': {
+                                'color': color_value,
+                                'metallic': metallic,
+                                'roughness': roughness,
+                                'specular': specular
+                            }
+                        },
+                        'object_name': obj_name
                     }
                     
                 except Exception as e:
@@ -368,7 +410,27 @@ class BlenderCommandHandler:
             
     @staticmethod
     async def get_scene_info(params: Dict[str, Any]) -> Dict[str, Any]:
-        """Get information about the current scene"""
+        """获取场景信息
+        
+        Args:
+            params: 命令参数 (无需参数)
+                
+        Returns:
+            Dict[str, Any]: 场景信息，包含:
+                - scene: 场景信息
+                    - name: 场景名称
+                    - frame_current: 当前帧
+                    - frame_start: 开始帧
+                    - frame_end: 结束帧
+                - objects: 对象列表
+                    - object_name: 对象名称
+                    - object_type: 对象类型
+                    - location: 位置 [x, y, z]
+                    - rotation: 旋转 [x, y, z]
+                    - scale: 缩放 [x, y, z]
+                    - visible: 可见性
+                    - materials: 材质列表
+        """
         try:
             logger.info("开始获取场景信息")
             
@@ -387,20 +449,13 @@ class BlenderCommandHandler:
                         try:
                             obj_info = {
                                 'object_name': obj.name,
-                                'type': obj.type,
-                                'location': tuple(obj.location),
-                                'rotation': tuple(obj.rotation_euler),
-                                'scale': tuple(obj.scale),
-                                'visible': obj.visible_get()
+                                'object_type': obj.type,
+                                'location': list(obj.location),
+                                'rotation': list(obj.rotation_euler),
+                                'scale': list(obj.scale),
+                                'visible': obj.visible_get(),
+                                'materials': [mat.name for mat in obj.data.materials] if obj.data and hasattr(obj.data, 'materials') else []
                             }
-                            
-                            if obj.material_slots:
-                                materials = []
-                                for slot in obj.material_slots:
-                                    if slot.material:
-                                        materials.append(slot.material.name)
-                                obj_info['materials'] = materials
-                                
                             objects.append(obj_info)
                             logger.debug(f"已处理对象: {obj.name}")
                         except Exception as e:
@@ -409,11 +464,13 @@ class BlenderCommandHandler:
                             continue
                     
                     result = {
-                        'scene_name': scene.name,
-                        'objects': objects,
-                        'frame_current': scene.frame_current,
-                        'frame_start': scene.frame_start,
-                        'frame_end': scene.frame_end
+                        'scene': {
+                            'name': scene.name,
+                            'frame_current': scene.frame_current,
+                            'frame_start': scene.frame_start,
+                            'frame_end': scene.frame_end
+                        },
+                        'objects': objects
                     }
                     logger.debug(f"场景信息获取成功: {result}")
                     return result
@@ -438,16 +495,30 @@ class BlenderCommandHandler:
         
         Args:
             params: 命令参数
-                - name: 对象名称
+                - object_name: 对象名称
                 
         Returns:
-            Dict[str, Any]: 对象信息
+            Dict[str, Any]: 对象信息，包含:
+                - object: 对象信息
+                    - object_name: 对象名称
+                    - object_type: 对象类型
+                    - location: 位置 [x, y, z]
+                    - rotation: 旋转 [x, y, z]
+                    - scale: 缩放 [x, y, z]
+                    - dimensions: 尺寸 [x, y, z]
+                    - visible: 可见性
+                    - materials: 材质列表
         """
         try:
             logger.info(f"开始获取对象信息，参数: {params}")
-            object_name = params.get('object_name')
-            if not object_name:
-                raise ParameterError("缺少对象名称")
+            
+            # 验证必需参数
+            if 'object_name' not in params:
+                raise ParameterError("缺少必需的'object_name'参数")
+            
+            object_name = params['object_name']
+            if not isinstance(object_name, str):
+                raise ParameterError("'object_name'参数必须是字符串类型")
                 
             def get_object_info_sync():
                 obj = bpy.data.objects.get(object_name)
@@ -455,14 +526,16 @@ class BlenderCommandHandler:
                     raise BlenderError(f"对象不存在: {object_name}")
                     
                 return {
-                    'object_name': obj.name,
-                    'type': obj.type,
-                    'location': list(obj.location),
-                    'rotation': list(obj.rotation_euler),
-                    'scale': list(obj.scale),
-                    'dimensions': list(obj.dimensions),
-                    'visible': obj.visible_get(),
-                    'materials': [mat.name for mat in obj.data.materials] if obj.data and hasattr(obj.data, 'materials') else []
+                    'object': {
+                        'object_name': obj.name,
+                        'object_type': obj.type,
+                        'location': list(obj.location),
+                        'rotation': list(obj.rotation_euler),
+                        'scale': list(obj.scale),
+                        'dimensions': list(obj.dimensions),
+                        'visible': obj.visible_get(),
+                        'materials': [mat.name for mat in obj.data.materials] if obj.data and hasattr(obj.data, 'materials') else []
+                    }
                 }
                 
             return await run_in_blender(get_object_info_sync)
@@ -630,76 +703,176 @@ class BlenderCommandHandler:
             
     @staticmethod
     async def set_light_type(params: Dict[str, Any]) -> Dict[str, Any]:
-        """设置灯光类型"""
+        """设置灯光类型
+        
+        Args:
+            params: 命令参数
+                - object_name: 对象名称
+                - light_type: 灯光类型 (POINT, SUN, SPOT, AREA)
+                
+        Returns:
+            Dict[str, Any]: 设置结果，包含:
+                - light: 灯光信息
+                    - object_name: 对象名称
+                    - light_type: 灯光类型
+        """
         try:
             logger.info(f"开始设置灯光类型，参数: {params}")
-            object_name = params.get('object_name')
-            light_type = params.get('light_type')
-            if not object_name or not light_type:
-                raise ParameterError("Object name and light type are required")
+            
+            # 验证必需参数
+            if 'object_name' not in params:
+                raise ParameterError("缺少必需的'object_name'参数")
+            if 'light_type' not in params:
+                raise ParameterError("缺少必需的'light_type'参数")
+                
+            object_name = params['object_name']
+            light_type = params['light_type']
+            
+            if not isinstance(object_name, str):
+                raise ParameterError("'object_name'参数必须是字符串类型")
+            if not isinstance(light_type, str):
+                raise ParameterError("'light_type'参数必须是字符串类型")
+                
+            # 验证灯光类型
+            valid_types = {'POINT', 'SUN', 'SPOT', 'AREA'}
+            if light_type.upper() not in valid_types:
+                raise ParameterError(f"无效的灯光类型: {light_type}，有效类型: {', '.join(valid_types)}")
 
             def set_light_type_sync():
                 obj = bpy.data.objects.get(object_name)
-                if not obj or obj.type != 'LIGHT':
-                    raise BlenderError(f"Object is not a light: {object_name}")
+                if not obj:
+                    raise BlenderError(f"对象不存在: {object_name}")
+                if obj.type != 'LIGHT':
+                    raise BlenderError(f"对象不是灯光: {object_name}")
                 
-                obj.data.type = light_type
+                obj.data.type = light_type.upper()
                 return {
-                    'object_name': object_name,
-                    'light_type': light_type
+                    'light': {
+                        'object_name': object_name,
+                        'light_type': obj.data.type
+                    }
                 }
 
             return await run_in_blender(set_light_type_sync)
 
         except Exception as e:
             logger.error(f"设置灯光类型失败: {e}")
+            logger.error(f"错误堆栈: {traceback.format_exc()}")
             raise BlenderError(str(e))
 
     @staticmethod
     async def set_light_energy(params: Dict[str, Any]) -> Dict[str, Any]:
-        """设置灯光能量"""
+        """设置灯光能量
+        
+        Args:
+            params: 命令参数
+                - object_name: 对象名称
+                - energy: 灯光能量 (正数)
+                
+        Returns:
+            Dict[str, Any]: 设置结果，包含:
+                - light: 灯光信息
+                    - object_name: 对象名称
+                    - energy: 灯光能量
+        """
         try:
             logger.info(f"开始设置灯光能量，参数: {params}")
-            object_name = params.get('object_name')
-            energy = params.get('energy')
-            if not object_name or energy is None:
-                raise ParameterError("Object name and energy are required")
+            
+            # 验证必需参数
+            if 'object_name' not in params:
+                raise ParameterError("缺少必需的'object_name'参数")
+            if 'energy' not in params:
+                raise ParameterError("缺少必需的'energy'参数")
+                
+            object_name = params['object_name']
+            energy = params['energy']
+            
+            if not isinstance(object_name, str):
+                raise ParameterError("'object_name'参数必须是字符串类型")
+            if not isinstance(energy, (int, float)):
+                raise ParameterError("'energy'参数必须是数字类型")
+            if energy < 0:
+                raise ParameterError("'energy'参数必须是正数")
 
             def set_light_energy_sync():
                 obj = bpy.data.objects.get(object_name)
-                if not obj or obj.type != 'LIGHT':
-                    raise BlenderError(f"Object is not a light: {object_name}")
+                if not obj:
+                    raise BlenderError(f"对象不存在: {object_name}")
+                if obj.type != 'LIGHT':
+                    raise BlenderError(f"对象不是灯光: {object_name}")
                 
                 obj.data.energy = float(energy)
                 return {
-                    'object_name': object_name,
-                    'energy': energy
+                    'light': {
+                        'object_name': object_name,
+                        'energy': obj.data.energy
+                    }
                 }
 
             return await run_in_blender(set_light_energy_sync)
 
         except Exception as e:
             logger.error(f"设置灯光能量失败: {e}")
+            logger.error(f"错误堆栈: {traceback.format_exc()}")
             raise BlenderError(str(e))
 
     @staticmethod
     async def advanced_lighting(params: Dict[str, Any]) -> Dict[str, Any]:
-        """设置高级灯光参数"""
+        """设置高级灯光参数
+        
+        Args:
+            params: 命令参数
+                - object_name: 对象名称
+                - light_type: 灯光类型 (POINT, SUN, SPOT, AREA)
+                - location: 位置 [x, y, z]
+                - energy: 灯光能量 (正数)
+                - color: 颜色 [r, g, b] (可选，默认 [1.0, 1.0, 1.0])
+                
+        Returns:
+            Dict[str, Any]: 设置结果，包含:
+                - light: 灯光信息
+                    - object_name: 对象名称
+                    - light_type: 灯光类型
+                    - location: 位置
+                    - energy: 灯光能量
+                    - color: 颜色
+        """
         try:
             logger.info(f"开始设置高级灯光参数，参数: {params}")
-            object_name = params.get('object_name')
-            light_type = params.get('light_type')
-            location = params.get('location')
-            energy = params.get('energy')
+            
+            # 验证必需参数
+            required_params = ['object_name', 'light_type', 'location', 'energy']
+            for param in required_params:
+                if param not in params:
+                    raise ParameterError(f"缺少必需的'{param}'参数")
+                    
+            object_name = params['object_name']
+            light_type = params['light_type']
+            location = params['location']
+            energy = params['energy']
             color = params.get('color', [1.0, 1.0, 1.0])
-
-            if not all([object_name, light_type, location, energy]):
-                raise ParameterError("Missing required parameters")
+            
+            # 验证参数类型
+            if not isinstance(object_name, str):
+                raise ParameterError("'object_name'参数必须是字符串类型")
+            if not isinstance(light_type, str):
+                raise ParameterError("'light_type'参数必须是字符串类型")
+            if not isinstance(location, (list, tuple)) or len(location) != 3:
+                raise ParameterError("'location'参数必须是包含3个元素的列表或元组")
+            if not isinstance(energy, (int, float)) or energy < 0:
+                raise ParameterError("'energy'参数必须是正数")
+            if not isinstance(color, (list, tuple)) or len(color) != 3:
+                raise ParameterError("'color'参数必须是包含3个元素的列表或元组")
+                
+            # 验证灯光类型
+            valid_types = {'POINT', 'SUN', 'SPOT', 'AREA'}
+            if light_type.upper() not in valid_types:
+                raise ParameterError(f"无效的灯光类型: {light_type}，有效类型: {', '.join(valid_types)}")
 
             def advanced_lighting_sync():
                 # 创建新的灯光
                 bpy.ops.object.light_add(
-                    type=light_type,
+                    type=light_type.upper(),
                     location=location
                 )
                 obj = bpy.context.active_object
@@ -708,41 +881,86 @@ class BlenderCommandHandler:
                 obj.data.color = color
 
                 return {
-                    'object_name': object_name,
-                    'light_type': light_type,
-                    'location': location,
-                    'energy': energy,
-                    'color': color
+                    'light': {
+                        'object_name': object_name,
+                        'light_type': obj.data.type,
+                        'location': list(obj.location),
+                        'energy': obj.data.energy,
+                        'color': list(obj.data.color)
+                    }
                 }
 
             return await run_in_blender(advanced_lighting_sync)
 
         except Exception as e:
             logger.error(f"设置高级灯光参数失败: {e}")
+            logger.error(f"错误堆栈: {traceback.format_exc()}")
             raise BlenderError(str(e))
 
     @staticmethod
     async def set_active_camera(params: Dict[str, Any]) -> Dict[str, Any]:
-        """设置活动相机"""
+        """设置活动相机
+        
+        Args:
+            params: 命令参数
+                - object_name: 对象名称
+                - focal_length: 焦距 (可选，默认 50.0)
+                - sensor_width: 传感器宽度 (可选，默认 36.0)
+                
+        Returns:
+            Dict[str, Any]: 设置结果，包含:
+                - camera: 相机信息
+                    - object_name: 对象名称
+                    - focal_length: 焦距
+                    - sensor_width: 传感器宽度
+                    - is_active: 是否为活动相机
+        """
         try:
             logger.info(f"开始设置活动相机，参数: {params}")
-            object_name = params.get('object_name')
-            if not object_name:
-                raise ParameterError("Object name is required")
+            
+            # 验证必需参数
+            if 'object_name' not in params:
+                raise ParameterError("缺少必需的'object_name'参数")
+                
+            object_name = params['object_name']
+            if not isinstance(object_name, str):
+                raise ParameterError("'object_name'参数必须是字符串类型")
+                
+            # 验证可选参数
+            focal_length = params.get('focal_length', 50.0)
+            sensor_width = params.get('sensor_width', 36.0)
+            
+            if not isinstance(focal_length, (int, float)) or focal_length <= 0:
+                raise ParameterError("'focal_length'参数必须是正数")
+            if not isinstance(sensor_width, (int, float)) or sensor_width <= 0:
+                raise ParameterError("'sensor_width'参数必须是正数")
 
             def set_active_camera_sync():
                 obj = bpy.data.objects.get(object_name)
-                if not obj or obj.type != 'CAMERA':
-                    raise BlenderError(f"Object is not a camera: {object_name}")
+                if not obj:
+                    raise BlenderError(f"对象不存在: {object_name}")
+                if obj.type != 'CAMERA':
+                    raise BlenderError(f"对象不是相机: {object_name}")
                 
+                # 设置相机参数
+                obj.data.lens = focal_length
+                obj.data.sensor_width = sensor_width
+                
+                # 设置为活动相机
                 bpy.context.scene.camera = obj
+                
                 return {
-                    'object_name': object_name,
-                    'active': True
+                    'camera': {
+                        'object_name': object_name,
+                        'focal_length': obj.data.lens,
+                        'sensor_width': obj.data.sensor_width,
+                        'is_active': True
+                    }
                 }
 
             return await run_in_blender(set_active_camera_sync)
 
         except Exception as e:
             logger.error(f"设置活动相机失败: {e}")
+            logger.error(f"错误堆栈: {traceback.format_exc()}")
             raise BlenderError(str(e)) 

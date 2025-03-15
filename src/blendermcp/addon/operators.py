@@ -7,17 +7,19 @@ This module implements the operators for the BlenderMCP addon.
 import bpy
 import logging
 import threading
-import asyncio
-import weakref
+import subprocess
+import os
+import sys
+import tempfile
 from bpy.types import Operator
 import traceback
 
 logger = logging.getLogger(__name__)
 
 # 全局服务器实例引用
-_server_instance = None
+_server_process = None
 _server_thread = None
-_server_event_loop = None
+_server_running = False
 
 class StartServerOperator(Operator):
     """Start BlenderMCP Server"""
@@ -29,56 +31,89 @@ class StartServerOperator(Operator):
             logger.info("启动服务器")
             
             # 检查服务器是否已经在运行
-            global _server_instance, _server_thread, _server_event_loop
-            if _server_instance is not None and _server_instance() is not None:
+            global _server_process, _server_thread, _server_running
+            if _server_running:
                 logger.warning("服务器已经在运行")
                 self.report({'WARNING'}, "服务器已经在运行")
                 return {'CANCELLED'}
             
-            # 动态导入服务器创建函数
-            from ..server.server import create_server
+            # 获取Python可执行文件路径
+            python_exe = "python" if sys.platform == "win32" else "python3"
             
-            # 创建服务器实例
-            server = create_server()
-            _server_instance = weakref.ref(server)
+            # 创建启动脚本
+            script_content = """
+import sys
+import os
+
+# 添加项目根目录到Python路径
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(current_dir)))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
+# 导入服务器模块
+from blendermcp.server.server import create_server
+import asyncio
+
+# 创建并启动服务器
+async def main():
+    server = create_server()
+    await server.start()
+    await asyncio.Future()  # 永远运行
+
+if __name__ == "__main__":
+    asyncio.run(main())
+"""
             
-            # 在新线程中运行服务器
-            def run_server():
+            # 创建临时脚本文件
+            script_path = os.path.join(tempfile.gettempdir(), f"blendermcp_server_{os.getpid()}.py")
+            with open(script_path, "w") as f:
+                f.write(script_content)
+            
+            # 启动服务器进程
+            _server_process = subprocess.Popen(
+                [python_exe, script_path],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            
+            # 标记为运行中
+            _server_running = True
+            
+            # 启动监控线程
+            def monitor_process():
+                global _server_process, _server_running
+                
+                # 等待进程结束
+                _server_process.wait()
+                
+                # 进程已结束
+                _server_running = False
+                
+                # 清理临时脚本
                 try:
-                    # 创建新的事件循环
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    global _server_event_loop
-                    _server_event_loop = loop
-                    
-                    # 启动服务器
-                    loop.run_until_complete(server.start())
-                    loop.run_forever()
-                except Exception as e:
-                    logger.error(f"服务器运行出错: {e}")
-                    logger.error(f"错误堆栈: {traceback.format_exc()}")
-                    context.scene.blendermcp.add_log(f"服务器运行出错: {e}", 'ERROR')
-                finally:
-                    # 清理事件循环
-                    if not loop.is_closed():
-                        loop.close()
-                    _server_event_loop = None
-                    
-            # 创建并启动服务器线程
-            thread = threading.Thread(target=run_server)
-            thread.daemon = True
-            thread.start()
-            _server_thread = thread
+                    os.remove(script_path)
+                except:
+                    pass
+                
+                # 更新UI状态
+                def update_ui():
+                    try:
+                        if bpy.context.scene is not None:
+                            bpy.context.scene.blendermcp.add_log("服务器已停止", 'INFO')
+                            bpy.context.scene.blendermcp.last_command = "stop_server"
+                            bpy.context.scene.blendermcp.last_result = "Server stopped"
+                            bpy.context.scene.blendermcp.last_result_success = True
+                    except:
+                        pass
+                
+                # 在主线程中更新UI
+                bpy.app.timers.register(update_ui, first_interval=0.1)
             
-            # 等待服务器启动
-            import time
-            for _ in range(10):  # 最多等待2秒
-                if _server_event_loop is not None and server._running:
-                    break
-                time.sleep(0.2)
-            
-            if not server._running:
-                raise RuntimeError("服务器启动超时")
+            _server_thread = threading.Thread(target=monitor_process)
+            _server_thread.daemon = True
+            _server_thread.start()
             
             # 更新状态
             context.scene.blendermcp.add_log("服务器已启动", 'INFO')
@@ -109,53 +144,31 @@ class StopServerOperator(Operator):
         try:
             logger.info("停止服务器")
             
-            # 获取服务器实例
-            global _server_instance, _server_thread, _server_event_loop
-            if _server_instance is None:
-                logger.warning("服务器实例不存在")
-                context.scene.blendermcp.add_log("服务器实例不存在", 'WARNING')
+            # 获取服务器进程
+            global _server_process, _server_thread, _server_running
+            if not _server_running or _server_process is None:
+                logger.warning("服务器未运行")
+                context.scene.blendermcp.add_log("服务器未运行", 'WARNING')
                 return {'CANCELLED'}
-                
-            server = _server_instance()
-            if server is None:
-                logger.warning("服务器实例已被回收")
-                context.scene.blendermcp.add_log("服务器实例已被回收", 'WARNING')
-                return {'CANCELLED'}
-                
-            # 停止服务器
-            def stop_server():
-                try:
-                    # 获取事件循环
-                    loop = _server_event_loop
-                    if loop is None or loop.is_closed():
-                        logger.warning("事件循环已关闭")
-                        return
-                        
-                    # 停止服务器
-                    loop.call_soon_threadsafe(
-                        lambda: asyncio.create_task(server.stop())
-                    )
-                    
-                    # 停止事件循环
-                    loop.call_soon_threadsafe(loop.stop)
-                except Exception as e:
-                    logger.error(f"停止服务器时出错: {e}")
-                    logger.error(f"错误堆栈: {traceback.format_exc()}")
-                    context.scene.blendermcp.add_log(f"停止服务器时出错: {e}", 'ERROR')
-                    
-            # 在新线程中停止服务器
-            stop_thread = threading.Thread(target=stop_server)
-            stop_thread.start()
-            stop_thread.join()
             
-            # 等待服务器线程结束
-            if _server_thread is not None and _server_thread.is_alive():
-                _server_thread.join(timeout=5.0)
+            # 终止进程
+            if sys.platform == "win32":
+                # Windows上使用taskkill强制终止进程树
+                subprocess.call(['taskkill', '/F', '/T', '/PID', str(_server_process.pid)])
+            else:
+                # Unix系统上发送SIGTERM信号
+                _server_process.terminate()
+                
+                # 等待进程结束
+                _server_process.wait(timeout=5)
+                
+                # 如果进程仍在运行，强制终止
+                if _server_process.poll() is None:
+                    _server_process.kill()
             
-            # 清理状态
-            _server_instance = None
-            _server_thread = None
-            _server_event_loop = None
+            # 重置状态
+            _server_running = False
+            _server_process = None
             
             # 更新状态
             context.scene.blendermcp.add_log("服务器已停止", 'INFO')
@@ -206,5 +219,13 @@ def register_operators():
 
 def unregister_operators():
     """注销所有操作符类"""
+    # 确保服务器停止
+    global _server_running, _server_process
+    if _server_running and _server_process is not None:
+        if sys.platform == "win32":
+            subprocess.call(['taskkill', '/F', '/T', '/PID', str(_server_process.pid)])
+        else:
+            _server_process.terminate()
+    
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls) 

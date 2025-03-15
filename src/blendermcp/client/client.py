@@ -10,9 +10,10 @@ import logging
 import uuid
 import traceback
 import websockets
-from typing import Any, Dict, Optional, Union, List, Type
+from typing import Any, Dict, Optional, Union, List, Type, Callable, Awaitable
 from pathlib import Path
 import jsonschema
+from datetime import datetime
 
 from .config import MCPConfig, ToolDefinition
 from .tools import ToolRegistry
@@ -27,41 +28,30 @@ from .api_spec import (
     get_endpoint, validate_version, get_deprecated_endpoints
 )
 from .connection import ConnectionPool
+from ..common.errors import BlenderMCPError
 
 logger = logging.getLogger(__name__)
 
 class BlenderMCPClient:
     """BlenderMCP client implementation"""
     
-    def __init__(
-        self,
-        host: str = "localhost",
-        port: int = 9876,
-        max_connections: int = 10,
-        min_connections: int = 2,
-        config_path: Optional[str] = None
-    ):
+    def __init__(self, host: str = "localhost", port: int = 9876):
         """Initialize the client
         
         Args:
             host: Server host
             port: Server port
-            max_connections: Maximum number of connections
-            min_connections: Minimum number of connections
-            config_path: Path to configuration file
         """
         self.host = host
         self.port = port
-        self.config = MCPConfig(config_path) if config_path else MCPConfig()
+        self.url = f"ws://{host}:{port}"
+        self.connection_pool = ConnectionPool()
+        self.session_id: Optional[str] = None
+        self._message_callbacks: Dict[str, Callable] = {}
+        self._response_futures: Dict[str, asyncio.Future] = {}
+        self.config = MCPConfig()
         self.tool_registry = ToolRegistry(self.config)
         self.api_version = API_VERSION
-        self.connection_pool = ConnectionPool(
-            host=host,
-            port=port,
-            max_size=max_connections,
-            min_size=min_connections
-        )
-        self._is_connected = False
         self._setup_default_tools()
         
     def _setup_default_tools(self) -> None:
@@ -76,24 +66,184 @@ class BlenderMCPClient:
                 handler=getattr(self, f"_handle_{endpoint.name}", None)
             ))
             
+    async def connect(self) -> None:
+        """连接到服务器"""
+        try:
+            self.ws = await self.connection_pool.get_connection(self.url)
+            # 启动消息处理任务
+            asyncio.create_task(self._process_messages())
+            logger.info(f"已连接到服务器: {self.url}")
+        except Exception as e:
+            logger.error(f"连接服务器失败: {e}")
+            raise ConnectionError(f"连接服务器失败: {e}")
+            
+    async def disconnect(self) -> None:
+        """断开连接"""
+        if hasattr(self, 'ws'):
+            await self.connection_pool.close_all()
+            logger.info("已断开服务器连接")
+            
+    async def login(self, username: str, password: str) -> Dict[str, Any]:
+        """登录
+        
+        Args:
+            username: 用户名
+            password: 密码
+            
+        Returns:
+            登录响应
+        """
+        response = await self.send_command(
+            "login",
+            {"username": username, "password": password}
+        )
+        
+        if "session_id" in response:
+            self.session_id = response["session_id"]
+            logger.info(f"登录成功: {username}")
+        
+        return response
+        
+    async def logout(self) -> Dict[str, Any]:
+        """登出
+        
+        Returns:
+            登出响应
+        """
+        if not self.session_id:
+            return {"status": "error", "message": "未登录"}
+            
+        response = await self.send_command("logout", {})
+        self.session_id = None
+        logger.info("已登出")
+        return response
+        
+    async def send_command(
+        self, 
+        command: str, 
+        params: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """发送命令
+        
+        Args:
+            command: 命令名称
+            params: 命令参数
+            
+        Returns:
+            命令响应
+        """
+        if not hasattr(self, 'ws'):
+            raise ConnectionError("未连接到服务器")
+            
+        message_id = str(uuid.uuid4())
+        message = {
+            "id": message_id,
+            "command": command,
+            "params": params
+        }
+        
+        # 如果已登录，添加会话ID
+        if self.session_id and command != "login":
+            message["session_id"] = self.session_id
+            
+        # 创建Future用于等待响应
+        future = asyncio.get_event_loop().create_future()
+        self._response_futures[message_id] = future
+        
+        # 发送消息
+        try:
+            await self.ws.send(json.dumps(message))
+        except Exception as e:
+            del self._response_futures[message_id]
+            logger.error(f"发送命令失败: {e}")
+            raise ConnectionError(f"发送命令失败: {e}")
+            
+        # 等待响应
+        try:
+            response = await asyncio.wait_for(future, timeout=30)
+            return response
+        except asyncio.TimeoutError:
+            del self._response_futures[message_id]
+            logger.error("命令响应超时")
+            raise ConnectionError("命令响应超时")
+            
+    async def _process_messages(self) -> None:
+        """处理接收到的消息"""
+        if not hasattr(self, 'ws'):
+            return
+            
+        try:
+            async for message in self.ws:
+                try:
+                    data = json.loads(message)
+                    await self._handle_message(data)
+                except json.JSONDecodeError:
+                    logger.error(f"无效的JSON消息: {message}")
+                except Exception as e:
+                    logger.error(f"处理消息时出错: {e}")
+        except Exception as e:
+            logger.error(f"消息处理循环中断: {e}")
+            
+    async def _handle_message(self, data: Dict[str, Any]) -> None:
+        """处理消息
+        
+        Args:
+            data: 消息数据
+        """
+        # 处理响应
+        if "id" in data and data["id"] in self._response_futures:
+            future = self._response_futures.pop(data["id"])
+            if not future.done():
+                future.set_result(data)
+                
+        # 处理通知
+        elif "type" in data and data["type"] == "notification":
+            notification_type = data.get("notification_type")
+            if notification_type in self._message_callbacks:
+                await self._message_callbacks[notification_type](data)
+                
+        # 处理未知消息
+        else:
+            logger.warning(f"收到未处理的消息: {data}")
+            
+    def register_notification_handler(
+        self, 
+        notification_type: str, 
+        callback: Callable[[Dict[str, Any]], Awaitable[None]]
+    ) -> None:
+        """注册通知处理器
+        
+        Args:
+            notification_type: 通知类型
+            callback: 回调函数
+        """
+        self._message_callbacks[notification_type] = callback
+        
+    def unregister_notification_handler(self, notification_type: str) -> None:
+        """注销通知处理器
+        
+        Args:
+            notification_type: 通知类型
+        """
+        if notification_type in self._message_callbacks:
+            del self._message_callbacks[notification_type]
+        
     async def start(self):
         """启动客户端"""
         try:
-            await self.connection_pool.start()
-            self._is_connected = True
+            await self.connect()
             logger.info(f"客户端已启动: {self.host}:{self.port}")
         except Exception as e:
-            logger.error(f"客户端启动失败: {e}")
+            logger.error(f"启动客户端失败: {e}")
             raise
         
     async def stop(self):
         """停止客户端"""
         try:
-            await self.connection_pool.stop()
-            self._is_connected = False
+            await self.disconnect()
             logger.info("客户端已停止")
         except Exception as e:
-            logger.error(f"客户端停止失败: {e}")
+            logger.error(f"停止客户端失败: {e}")
             raise
         
     async def _validate_request(self, endpoint_name: str, params: Dict[str, Any]) -> bool:
@@ -136,7 +286,7 @@ class BlenderMCPClient:
     async def _handle_set_material(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """处理设置材质请求"""
         try:
-            response = await self._send_command("set_material", params)
+            response = await self.send_command("set_material", params)
             if isinstance(response, dict) and response.get("isError"):
                 return response
             return {
@@ -218,7 +368,7 @@ class BlenderMCPClient:
             "name": name,
             "node_setup": node_setup
         }
-        return await self._send_command("create_node_material", params)
+        return await self.send_command("create_node_material", params)
         
     # 高级灯光操作
     async def create_light(
@@ -242,7 +392,7 @@ class BlenderMCPClient:
             params["color"] = color
         if shadow is not None:
             params["shadow"] = shadow
-        return await self._send_command("create_light", params)
+        return await self.send_command("create_light", params)
         
     # 渲染操作
     async def set_render_settings(
@@ -261,7 +411,7 @@ class BlenderMCPClient:
             "resolution_y": resolution_y,
             "use_gpu": use_gpu
         }
-        return await self._send_command("set_render_settings", params)
+        return await self.send_command("set_render_settings", params)
         
     async def render_image(
         self,
@@ -275,7 +425,7 @@ class BlenderMCPClient:
             "format": format,
             "quality": quality
         }
-        return await self._send_command("render_image", params)
+        return await self.send_command("render_image", params)
         
     # 建模操作
     async def edit_mesh(
@@ -290,7 +440,7 @@ class BlenderMCPClient:
             "operation": operation,
             "parameters": parameters
         }
-        return await self._send_command("edit_mesh", params)
+        return await self.send_command("edit_mesh", params)
         
     async def add_modifier(
         self,
@@ -304,7 +454,7 @@ class BlenderMCPClient:
             "modifier_type": modifier_type,
             "parameters": parameters
         }
-        return await self._send_command("add_modifier", params)
+        return await self.send_command("add_modifier", params)
         
     # 动画操作
     async def create_animation(
@@ -319,7 +469,7 @@ class BlenderMCPClient:
             "property_path": property_path,
             "keyframes": keyframes
         }
-        return await self._send_command("create_animation", params)
+        return await self.send_command("create_animation", params)
         
     async def setup_physics(
         self,
@@ -333,12 +483,12 @@ class BlenderMCPClient:
             "physics_type": physics_type,
             "parameters": parameters
         }
-        return await self._send_command("setup_physics", params)
+        return await self.send_command("setup_physics", params)
 
     # 场景操作
     async def get_scene_info(self) -> Dict[str, Any]:
         """获取场景信息"""
-        return await self._send_command("get_scene_info", {})
+        return await self.send_command("get_scene_info", {})
     
     # 对象操作
     async def create_object(
@@ -371,7 +521,7 @@ class BlenderMCPClient:
         if scale:
             params["scale"] = scale
             
-        result = await self._send_command("create_object", params)
+        result = await self.send_command("create_object", params)
         logger.debug(f"创建对象结果: {result}")
         if "result" in result and "name" in result["result"]:
             return result
@@ -380,7 +530,7 @@ class BlenderMCPClient:
     async def delete_object(self, object_name: str) -> Dict[str, Any]:
         """删除对象"""
         params = {"object_name": object_name}
-        return await self._send_command("delete_object", params)
+        return await self.send_command("delete_object", params)
     
     async def get_object_info(self, object_name: str) -> Dict[str, Any]:
         """获取对象信息"""
@@ -388,7 +538,7 @@ class BlenderMCPClient:
             if not object_name:
                 raise ValidationError("对象名称不能为空")
             params = {"object_name": object_name}
-            return await self._send_command("get_object_info", params)
+            return await self.send_command("get_object_info", params)
         except Exception as e:
             return await self._handle_error(e, ErrorCategory.VALIDATION)
     
@@ -428,13 +578,13 @@ class BlenderMCPClient:
             PARAM_NAME: object_name,
             PARAM_TEXTURE_ID: texture_id
         }
-        return await self._send_command(SET_TEXTURE, params)
+        return await self.send_command(SET_TEXTURE, params)
 
     # API端点处理方法
     async def _handle_create_object(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """处理创建对象请求"""
         try:
-            response = await self._send_command("create_object", params)
+            response = await self.send_command("create_object", params)
             if isinstance(response, dict) and response.get("isError"):
                 return response
             return {
@@ -449,7 +599,7 @@ class BlenderMCPClient:
     async def _handle_create_light(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """处理创建灯光请求"""
         try:
-            response = await self._send_command("create_light", params)
+            response = await self.send_command("create_light", params)
             if isinstance(response, dict) and response.get("isError"):
                 return response
             return {
@@ -464,7 +614,7 @@ class BlenderMCPClient:
     async def _handle_render_image(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """处理渲染图像请求"""
         try:
-            response = await self._send_command("render_image", params)
+            response = await self.send_command("render_image", params)
             if isinstance(response, dict) and response.get("isError"):
                 return response
             return {

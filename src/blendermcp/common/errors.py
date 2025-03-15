@@ -16,6 +16,9 @@ class BlenderMCPError(Exception):
         self.code = code
         self.details = details or {}
 
+    def __str__(self):
+        return self.message
+
 class ConnectionError(BlenderMCPError):
     """Raised when there are connection issues"""
     def __init__(self, message: str, details: Optional[Dict[str, Any]] = None):
@@ -39,4 +42,36 @@ class ExecutionError(BlenderMCPError):
 class BlenderError(BlenderMCPError):
     """Raised when there are Blender-specific issues"""
     def __init__(self, message: str, details: Optional[Dict[str, Any]] = None):
-        super().__init__(message, ErrorCodes.BLENDER_ERROR, details) 
+        super().__init__(message, ErrorCodes.BLENDER_ERROR, details)
+
+class AuthError(BlenderMCPError):
+    """身份验证相关的错误"""
+    pass
+
+class SecurityError(BlenderMCPError):
+    """安全相关的错误"""
+    pass
+
+class ProtocolError(BlenderMCPError):
+    """协议相关的错误"""
+    pass
+
+class ConfigError(BlenderMCPError):
+    """配置相关的错误"""
+    pass
+
+class ResourceError(BlenderMCPError):
+    """资源限制相关的错误"""
+    pass
+
+class BlenderAPIError(BlenderMCPError):
+    """Blender API相关的错误"""
+    pass
+
+class MCPError(BlenderMCPError):
+    """MCP协议操作相关的错误"""
+    
+    def __init__(self, message: str, code: int = -32000, data=None, *args, **kwargs):
+        super().__init__(message, *args, **kwargs)
+        self.code = code
+        self.data = data 

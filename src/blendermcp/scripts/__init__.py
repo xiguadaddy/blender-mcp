@@ -1,0 +1,3 @@
+"""
+BlenderMCP Scripts Package
+""" 

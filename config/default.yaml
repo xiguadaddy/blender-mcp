@@ -1,0 +1,59 @@
+# BlenderMCP 默认配置文件
+
+server:
+  host: localhost
+  port: 9876
+  debug: false
+
+security:
+  # 安全路径白名单
+  safe_paths:
+    - ./data
+    - ./temp
+  
+  # 资源使用限制
+  resource_limits:
+    max_objects: 1000        # 最大对象数
+    max_vertices: 100000     # 最大顶点数
+    max_file_size: 104857600 # 最大文件大小（100MB）
+    max_memory: 1073741824   # 最大内存使用（1GB）
+
+auth:
+  # 会话超时时间（秒）
+  session_timeout: 3600
+  
+  # 默认用户
+  default_users:
+    admin:
+      password: admin123
+      role: admin
+    user:
+      password: user123
+      role: user
+  
+  # 角色权限
+  permissions:
+    user:
+      - create_object
+      - delete_object
+      - modify_object
+      - set_material
+      - get_scene_info
+      - get_object_info
+      - set_light
+      - set_camera
+    admin:
+      - "*"  # 管理员拥有所有权限
+
+logging:
+  # 日志级别：DEBUG, INFO, WARNING, ERROR, CRITICAL
+  level: INFO
+  
+  # 日志文件配置
+  file: blendermcp.log
+  max_size: 10485760    # 最大文件大小（10MB）
+  backup_count: 5       # 保留的备份文件数量
+  
+  # 日志格式
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  date_format: "%Y-%m-%d %H:%M:%S" 

@@ -80,7 +80,7 @@ async def create_chess_board(client: BlenderMCPClient):
     board_base = await client.create_object(
         object_type="MESH",
         object_name="chess_board",
-        location=[0, 0, -0.1],
+        location=[0, 0, -0.1], 
         scale=[4, 4, 0.2]
     )
     board_name = get_object_name(board_base)
@@ -229,13 +229,13 @@ async def create_chess_set():
         await client._send_command("set_active_camera", {"object_name": camera["result"]["object_name"]})
         
         logger.info("国际象棋套装创建完成")
-        
+
     except Exception as e:
-        logger.error(f"创建国际象棋套装时出错: {e}")
-        logger.error(traceback.format_exc())
+            logger.error(f"创建国际象棋套装时出错: {e}")
+            logger.error(traceback.format_exc())
     finally:
-        await client.stop()
-        logger.info("已断开与Blender的连接")
+            await client.stop()
+            logger.info("已断开与Blender的连接")
 
 if __name__ == "__main__":
     asyncio.run(create_chess_set())
