@@ -472,3 +472,149 @@ async def set_material(params: Dict[str, Any]) -> Dict[str, Any]:
 **参考资料**
 - [Python 作用域规则](https://docs.python.org/3/tutorial/classes.html#python-scopes-and-namespaces)
 - [Python 闭包](https://docs.python.org/3/reference/execution.html#naming-and-binding) 
+
+### 问题6: set_material方法参数名称错误
+
+**错误信息**
+```
+TypeError: BlenderMCPClient.set_material() got an unexpected keyword argument 'object'
+```
+
+**原因分析**
+在 `demos/chess_set.py` 中，我们使用了 `object` 作为 `set_material` 方法的参数名，但是根据客户端API的定义，应该使用 `object_name`。这是因为：
+1. `BlenderMCPClient.set_material()` 方法定义使用了 `object_name` 作为参数名
+2. 服务器端代码支持 `object` 和 `object_name`，但客户端API只支持 `object_name`
+3. 这种不一致导致了类型错误
+
+**解决方案**
+修改 `demos/chess_set.py` 中的 `set_material` 调用，使用正确的参数名称：
+
+```python
+# 修改前
+await client.set_material(
+    object=board_base["name"],
+    material="board_wood",
+    color=[0.4, 0.2, 0.1, 1.0]
+)
+
+# 修改后
+await client.set_material(
+    object_name=board_base["name"],
+    material_name="board_wood",
+    color=[0.4, 0.2, 0.1, 1.0]
+)
+```
+
+**注意事项**
+1. 确保使用正确的参数名称：`object_name` 而不是 `object`
+2. 同样，使用 `material_name` 而不是 `material`
+3. 检查API文档以确保使用正确的参数名称
+4. 在整个代码中保持参数名称的一致性
+
+**相关文件**
+- `demos/chess_set.py`
+- `src/blendermcp/client/client.py`
+- `src/blendermcp/server/handlers/blender_handler.py`
+
+**测试步骤**
+1. 修改所有 `set_material` 调用中的参数名称
+2. 重启 Blender
+3. 启用插件
+4. 启动服务器
+5. 运行测试脚本
+6. 验证材质是否正确应用到对象上
+
+**参考资料**
+- [Python 函数参数](https://docs.python.org/3/tutorial/controlflow.html#keyword-arguments)
+- [BlenderMCP API文档]() 
+
+### 问题7: set_material方法不支持高级材质参数
+
+**错误信息**
+```
+TypeError: BlenderMCPClient.set_material() got an unexpected keyword argument 'metallic'
+```
+
+**原因分析**
+在 `demos/chess_set.py` 中，我们尝试为材质设置高级属性（metallic、roughness、specular），但是客户端的 `set_material` 方法只支持基本参数：
+1. `BlenderMCPClient.set_material()` 方法只接受 `object_name`、`material_name` 和 `color` 参数
+2. 服务器端支持更多材质属性，但客户端API没有暴露这些参数
+3. 需要修改客户端API以支持这些高级材质属性
+
+**解决方案**
+有两种解决方案：
+
+1. 修改客户端代码中的 `set_material` 方法，添加对高级材质属性的支持：
+
+```python
+async def set_material(
+    self,
+    object_name: str,
+    material_name: Optional[str] = None,
+    color: Optional[List[float]] = None,
+    metallic: Optional[float] = None,
+    roughness: Optional[float] = None,
+    specular: Optional[float] = None
+) -> Dict[str, Any]:
+    """Set or create a material for an object with advanced properties"""
+    logger.info(f"设置材质: object={object_name}, material={material_name}")
+    params = {
+        "object": object_name,
+        "material": material_name
+    }
+    if color is not None:
+        params["color"] = color
+    if metallic is not None:
+        params["metallic"] = metallic
+    if roughness is not None:
+        params["roughness"] = roughness
+    if specular is not None:
+        params["specular"] = specular
+    return await self.send_command("set_material", params)
+```
+
+2. 或者修改 `demos/chess_set.py` 中的材质设置代码，只使用基本参数：
+
+```python
+# 修改前
+material_params = {
+    "object_name": piece["name"],
+    "material_name": material_name,
+    "color": color,
+    "metallic": 0.0 if is_white else 0.1,
+    "roughness": 0.3 if is_white else 0.4,
+    "specular": 0.7 if is_white else 0.5
+}
+await client.set_material(**material_params)
+
+# 修改后
+await client.set_material(
+    object_name=piece["name"],
+    material_name=material_name,
+    color=color
+)
+```
+
+**注意事项**
+1. 确保客户端API文档清晰说明支持的参数
+2. 在添加新参数时保持向后兼容性
+3. 考虑使用材质节点系统来设置高级属性
+4. 在服务器端正确处理这些高级属性
+
+**相关文件**
+- `demos/chess_set.py`
+- `src/blendermcp/client/client.py`
+- `src/blendermcp/server/handlers/blender_handler.py`
+
+**测试步骤**
+1. 选择一个解决方案实施
+2. 修改相关代码
+3. 重启 Blender
+4. 启用插件
+5. 启动服务器
+6. 运行测试脚本
+7. 验证材质是否正确应用，包括基本和高级属性
+
+**参考资料**
+- [Blender Python API - Materials](https://docs.blender.org/api/current/bpy.types.Material.html)
+- [Blender材质节点系统文档](https://docs.blender.org/manual/en/latest/render/shader_nodes/index.html) 

@@ -10,8 +10,11 @@ import logging
 import uuid
 import traceback
 import websockets
-from typing import Any, Dict, Optional, Union, List
+from typing import Any, Dict, Optional, Union, List, Type
+from pathlib import Path
 
+from .config import MCPConfig, ToolDefinition
+from .tools import ToolRegistry
 from .protocol.commands import *
 
 logger = logging.getLogger(__name__)
@@ -19,15 +22,19 @@ logger = logging.getLogger(__name__)
 class BlenderMCPClient:
     """BlenderMCP client implementation"""
     
-    def __init__(self, host: str = "localhost", port: int = 9876):
+    def __init__(self, config_path: Optional[str] = None):
         """Initialize the client
         
         Args:
-            host: Server host address
-            port: Server port number
+            config_path: Optional path to the configuration file
         """
-        self.host = host
-        self.port = port
+        # 加载配置
+        self.config = MCPConfig(config_path)
+        # 注册工具
+        self.tool_registry = ToolRegistry(self.config)
+        # 设置连接参数
+        self.host = self.config.config.get("host", "localhost")
+        self.port = self.config.config.get("port", 9876)
         self.websocket = None
         
     async def connect(self):
@@ -61,6 +68,11 @@ class BlenderMCPClient:
         if not self.websocket:
             raise RuntimeError("Not connected to server")
             
+        # 检查工具是否可用
+        tool = self.config.get_tool(command)
+        if tool and not self.config.is_tool_enabled(command):
+            raise RuntimeError(f"Tool {command} is disabled in configuration")
+            
         command_id = str(uuid.uuid4())
         message = {
             "id": command_id,
@@ -87,6 +99,156 @@ class BlenderMCPClient:
             logger.error(f"错误堆栈: {traceback.format_exc()}")
             raise
             
+    def list_available_tools(self, category: Optional[str] = None) -> List[Dict[str, Any]]:
+        """列出所有可用的工具
+        
+        Args:
+            category: 可选的工具类别过滤器
+            
+        Returns:
+            工具列表，每个工具包含名称、描述和参数信息
+        """
+        tools = self.config.list_tools(category)
+        return [{
+            "name": tool.name,
+            "description": tool.description,
+            "category": tool.category,
+            "parameters": tool.parameters,
+            "enabled": self.config.is_tool_enabled(tool.name)
+        } for tool in tools]
+        
+    def get_tool_categories(self) -> List[str]:
+        """获取所有工具类别"""
+        return self.config.get_tool_categories()
+        
+    # 高级材质操作
+    async def create_node_material(
+        self,
+        name: str,
+        node_setup: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """创建节点材质"""
+        params = {
+            "name": name,
+            "node_setup": node_setup
+        }
+        return await self.send_command("create_node_material", params)
+        
+    # 高级灯光操作
+    async def create_light(
+        self,
+        type: str,
+        name: Optional[str] = None,
+        location: Optional[List[float]] = None,
+        energy: Optional[float] = None,
+        color: Optional[List[float]] = None,
+        shadow: Optional[bool] = None
+    ) -> Dict[str, Any]:
+        """创建灯光"""
+        params = {"type": type}
+        if name:
+            params["name"] = name
+        if location:
+            params["location"] = location
+        if energy:
+            params["energy"] = energy
+        if color:
+            params["color"] = color
+        if shadow is not None:
+            params["shadow"] = shadow
+        return await self.send_command("create_light", params)
+        
+    # 渲染操作
+    async def set_render_settings(
+        self,
+        engine: str,
+        samples: int,
+        resolution_x: int,
+        resolution_y: int,
+        use_gpu: bool = True
+    ) -> Dict[str, Any]:
+        """设置渲染参数"""
+        params = {
+            "engine": engine,
+            "samples": samples,
+            "resolution_x": resolution_x,
+            "resolution_y": resolution_y,
+            "use_gpu": use_gpu
+        }
+        return await self.send_command("set_render_settings", params)
+        
+    async def render_image(
+        self,
+        output_path: str,
+        format: str = "PNG",
+        quality: int = 90
+    ) -> Dict[str, Any]:
+        """渲染图像"""
+        params = {
+            "output_path": output_path,
+            "format": format,
+            "quality": quality
+        }
+        return await self.send_command("render_image", params)
+        
+    # 建模操作
+    async def edit_mesh(
+        self,
+        object_name: str,
+        operation: str,
+        parameters: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """编辑网格"""
+        params = {
+            "object_name": object_name,
+            "operation": operation,
+            "parameters": parameters
+        }
+        return await self.send_command("edit_mesh", params)
+        
+    async def add_modifier(
+        self,
+        object_name: str,
+        modifier_type: str,
+        parameters: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """添加修改器"""
+        params = {
+            "object_name": object_name,
+            "modifier_type": modifier_type,
+            "parameters": parameters
+        }
+        return await self.send_command("add_modifier", params)
+        
+    # 动画操作
+    async def create_animation(
+        self,
+        object_name: str,
+        property_path: str,
+        keyframes: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """创建动画"""
+        params = {
+            "object_name": object_name,
+            "property_path": property_path,
+            "keyframes": keyframes
+        }
+        return await self.send_command("create_animation", params)
+        
+    async def setup_physics(
+        self,
+        object_name: str,
+        physics_type: str,
+        parameters: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """设置物理模拟"""
+        params = {
+            "object_name": object_name,
+            "physics_type": physics_type,
+            "parameters": parameters
+        }
+        return await self.send_command("setup_physics", params)
+
     # 场景操作
     async def get_scene_info(self) -> Dict[str, Any]:
         """Get information about the current scene"""

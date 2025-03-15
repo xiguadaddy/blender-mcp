@@ -1,0 +1,122 @@
+{
+    "host": "localhost",
+    "port": 9876,
+    "debug": true,
+    "tools": {
+        "material": {
+            "enabled": true,
+            "parameters": {
+                "default_metallic": 0.0,
+                "default_roughness": 0.5,
+                "default_specular": 0.5
+            }
+        },
+        "lighting": {
+            "enabled": true,
+            "parameters": {
+                "default_energy": 1000,
+                "default_color": [1.0, 1.0, 1.0],
+                "use_shadows": true
+            }
+        },
+        "render": {
+            "enabled": true,
+            "parameters": {
+                "engine": "CYCLES",
+                "samples": 128,
+                "resolution_x": 1920,
+                "resolution_y": 1080,
+                "use_gpu": true,
+                "output_format": "PNG",
+                "output_quality": 90
+            }
+        },
+        "modeling": {
+            "enabled": true,
+            "parameters": {
+                "subdivision_levels": 2,
+                "smooth_shading": true
+            }
+        },
+        "animation": {
+            "enabled": true,
+            "parameters": {
+                "fps": 24,
+                "frame_start": 1,
+                "frame_end": 250
+            }
+        }
+    },
+    "advanced_features": {
+        "node_materials": {
+            "enabled": true,
+            "presets": {
+                "metal": {
+                    "nodes": {
+                        "principled": {
+                            "type": "ShaderNodeBsdfPrincipled",
+                            "location": [0, 0],
+                            "properties": {
+                                "metallic": 1.0,
+                                "roughness": 0.2
+                            }
+                        },
+                        "output": {
+                            "type": "ShaderNodeOutputMaterial",
+                            "location": [300, 0]
+                        }
+                    },
+                    "links": [
+                        {
+                            "from_node": "principled",
+                            "from_socket": "BSDF",
+                            "to_node": "output",
+                            "to_socket": "Surface"
+                        }
+                    ]
+                },
+                "glass": {
+                    "nodes": {
+                        "glass": {
+                            "type": "ShaderNodeBsdfGlass",
+                            "location": [0, 0],
+                            "properties": {
+                                "IOR": 1.45,
+                                "roughness": 0.0
+                            }
+                        },
+                        "output": {
+                            "type": "ShaderNodeOutputMaterial",
+                            "location": [300, 0]
+                        }
+                    },
+                    "links": [
+                        {
+                            "from_node": "glass",
+                            "from_socket": "BSDF",
+                            "to_node": "output",
+                            "to_socket": "Surface"
+                        }
+                    ]
+                }
+            }
+        },
+        "physics": {
+            "enabled": true,
+            "presets": {
+                "rigid_body": {
+                    "type": "RIGID",
+                    "mass": 1.0,
+                    "friction": 0.5,
+                    "bounce": 0.5
+                },
+                "cloth": {
+                    "type": "CLOTH",
+                    "mass": 0.3,
+                    "air_damping": 1.0,
+                    "quality": 5
+                }
+            }
+        }
+    }
+} 
