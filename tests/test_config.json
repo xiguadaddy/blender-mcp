@@ -1,0 +1,17 @@
+{
+    "server": {
+        "host": "localhost",
+        "port": 9876,
+        "log_level": "DEBUG",
+        "max_connections": 5,
+        "command_timeout": 30.0
+    },
+    "client": {
+        "host": "localhost",
+        "port": 9876,
+        "log_level": "DEBUG",
+        "reconnect_attempts": 3,
+        "reconnect_delay": 1.0,
+        "command_timeout": 30.0
+    }
+} 

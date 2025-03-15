@@ -1,0 +1,212 @@
+"""
+BlenderMCP Addon
+
+This addon provides a bridge between Blender and external applications through WebSocket.
+"""
+
+import bpy
+import asyncio
+import threading
+from typing import Set
+from bpy.types import AddonPreferences
+from bpy.props import (
+    StringProperty,
+    IntProperty,
+    BoolProperty,
+    EnumProperty
+)
+
+from ..server.server import BlenderMCPServer
+from ..server.handlers import register_handlers
+from ..common.config import Config
+from .properties import classes as property_classes
+from .operators import classes as operator_classes
+from .panels import classes as panel_classes
+
+bl_info = {
+    "name": "BlenderMCP",
+    "author": "BlenderMCP Team",
+    "version": (1, 0, 0),
+    "blender": (3, 0, 0),
+    "location": "View3D > Sidebar > BlenderMCP",
+    "description": "Model Context Protocol for Blender",
+    "warning": "",
+    "doc_url": "",
+    "category": "Development",
+}
+
+# 全局变量
+_server_instance: BlenderMCPServer = None
+_server_thread: threading.Thread = None
+_config: Config = None
+
+class BlenderMCPAddonPreferences(AddonPreferences):
+    """Addon preferences"""
+    bl_idname = __package__
+
+    host: StringProperty(
+        name="Host",
+        description="Server host address",
+        default="localhost"
+    )
+
+    port: IntProperty(
+        name="Port",
+        description="Server port number",
+        default=9876,
+        min=1024,
+        max=65535
+    )
+
+    auto_start: BoolProperty(
+        name="Auto Start",
+        description="Start server automatically when Blender starts",
+        default=False
+    )
+
+    log_level: EnumProperty(
+        name="Log Level",
+        description="Logging level",
+        items=[
+            ('DEBUG', "Debug", "Debug level logging"),
+            ('INFO', "Info", "Info level logging"),
+            ('WARNING', "Warning", "Warning level logging"),
+            ('ERROR', "Error", "Error level logging"),
+        ],
+        default='INFO'
+    )
+
+    def draw(self, context):
+        """Draw the preferences panel"""
+        layout = self.layout
+        
+        # 服务器设置
+        box = layout.box()
+        box.label(text="Server Settings:")
+        row = box.row()
+        row.prop(self, "host")
+        row.prop(self, "port")
+        
+        # 常规设置
+        box = layout.box()
+        box.label(text="General Settings:")
+        box.prop(self, "auto_start")
+        box.prop(self, "log_level")
+
+def get_preferences(context) -> BlenderMCPAddonPreferences:
+    """Get addon preferences"""
+    return context.preferences.addons[__package__].preferences
+
+def start_server():
+    """Start the BlenderMCP server"""
+    global _server_instance, _server_thread, _config
+    
+    if _server_instance is not None:
+        return
+        
+    # 获取配置
+    prefs = get_preferences(bpy.context)
+    _config = Config()
+    _config.server.host = prefs.host
+    _config.server.port = prefs.port
+    _config.server.log_level = prefs.log_level
+    
+    # 创建服务器实例
+    _server_instance = BlenderMCPServer(
+        host=_config.server.host,
+        port=_config.server.port
+    )
+    
+    # 注册命令处理器
+    register_handlers(_server_instance)
+    
+    # 在新线程中启动服务器
+    def run_server():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(_server_instance.start())
+        
+    _server_thread = threading.Thread(target=run_server)
+    _server_thread.daemon = True
+    _server_thread.start()
+    
+    # 添加日志
+    bpy.context.scene.blendermcp.add_log(
+        f"Server started on {_config.server.host}:{_config.server.port}",
+        'INFO'
+    )
+
+def stop_server():
+    """Stop the BlenderMCP server"""
+    global _server_instance, _server_thread
+    
+    if _server_instance is None:
+        return
+        
+    # 停止服务器
+    async def stop():
+        await _server_instance.stop()
+        
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(stop())
+    
+    _server_instance = None
+    _server_thread = None
+    
+    # 添加日志
+    bpy.context.scene.blendermcp.add_log(
+        "Server stopped",
+        'INFO'
+    )
+
+class BLENDERMCP_OT_start_server(bpy.types.Operator):
+    """Start the BlenderMCP server"""
+    bl_idname = "blendermcp.start_server"
+    bl_label = "Start Server"
+    
+    def execute(self, context):
+        start_server()
+        return {'FINISHED'}
+
+class BLENDERMCP_OT_stop_server(bpy.types.Operator):
+    """Stop the BlenderMCP server"""
+    bl_idname = "blendermcp.stop_server"
+    bl_label = "Stop Server"
+    
+    def execute(self, context):
+        stop_server()
+        return {'FINISHED'}
+
+# 要注册的类
+classes = (
+    BlenderMCPAddonPreferences,
+    BLENDERMCP_OT_start_server,
+    BLENDERMCP_OT_stop_server,
+) + property_classes + operator_classes + panel_classes
+
+def register():
+    """Register the addon"""
+    # 注册属性
+    from .properties import BlenderMCPProperties
+    bpy.types.Scene.blendermcp = bpy.props.PointerProperty(type=BlenderMCPProperties)
+    
+    # 注册类
+    for cls in classes:
+        bpy.utils.register_class(cls)
+        
+    # 如果设置了自动启动，启动服务器
+    if get_preferences(bpy.context).auto_start:
+        start_server()
+
+def unregister():
+    """Unregister the addon"""
+    # 停止服务器
+    stop_server()
+    
+    # 注销类
+    for cls in reversed(classes):
+        bpy.utils.unregister_class(cls)
+        
+    # 删除属性
+    del bpy.types.Scene.blendermcp 

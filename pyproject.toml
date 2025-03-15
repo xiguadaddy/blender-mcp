@@ -1,32 +1,41 @@
 [project]
-name = "blender-mcp"
-version = "1.0.2"
-description = "Blender integration through the Model Context Protocol"
-readme = "README.md"
-requires-python = ">=3.10"
+name = "blendermcp"
+version = "0.1.0"
+description = "BlenderMCP - Blender Multi-Client Protocol"
 authors = [
-    {name = "Your Name", email = "your.email@example.com"}
-]
-license = {text = "MIT"}
-classifiers = [
-    "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: MIT License",
-    "Operating System :: OS Independent",
+    { name = "Your Name", email = "your.email@example.com" }
 ]
 dependencies = [
-    "mcp[cli]>=1.3.0",
+    "websockets>=10.0",
+    "aiohttp>=3.8.0",
+    "python-dotenv>=0.19.0",
 ]
-
-[project.scripts]
-blender-mcp = "blender_mcp.server:main"
-
-[build-system]
-requires = ["setuptools>=61.0", "wheel"]
-build-backend = "setuptools.build_meta"
-
-[tool.setuptools]
-package-dir = {"" = "src"}
+requires-python = ">=3.7"
+readme = "README.md"
+license = { text = "MIT" }
 
 [project.urls]
-"Homepage" = "https://github.com/yourusername/blender-mcp"
-"Bug Tracker" = "https://github.com/yourusername/blender-mcp/issues"
+Homepage = "https://github.com/yourusername/blendermcp"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/blendermcp"]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=6.0",
+    "pytest-asyncio>=0.15.0",
+    "black>=21.0",
+    "flake8>=3.9.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
