@@ -1,72 +1,133 @@
 # BlenderMCP
 
-BlenderMCP是一个Blender插件，实现了Model Context Protocol (MCP)服务器，允许AI工具（如Claude和Cursor）与Blender进行通信，实现AI辅助的3D建模、动画和渲染功能。
+BlenderMCP 是一个为Blender提供MCP（Minimal Capabilities Protocol）支持的项目，它允许您通过标准的通信协议远程控制和操作Blender。
 
-![BlenderMCP Logo](docs/images/blendermcp_logo.png)
+## 项目架构
 
-## 主要特性
+项目采用了进程分离的架构设计，以解决Blender Python环境限制的问题：
 
-- 支持WebSocket和标准输入/输出(STDIO)通信模式
-- 完全兼容MCP协议规范
-- 解决了Blender环境中的asyncio兼容性问题
-- 支持动态工具注册和发现
-- 提供完整的错误处理和日志记录
-- 用户友好的界面，易于配置和使用
+1. **MCP服务器核心 (Server Core)**：
+   - 独立的Python进程运行，不依赖`bpy`
+   - 使用最新的`asyncio`功能，实现MCP协议的核心逻辑
+   - 负责与外部MCP客户端进行网络通信（WebSocket, HTTP或STDIO）
+   - 不直接操作Blender场景或数据
 
-## 快速开始
+2. **Blender插件 (Blender Addon)**：
+   - 作为Blender的插件运行，依赖`bpy`
+   - 负责Blender内部的操作，如场景修改、对象创建等
+   - 通过进程间通信(IPC)机制与MCP服务器核心通信
+   - 将接收到的指令转换为`bpy`操作并执行
 
-### 安装
+3. **IPC机制**：
+   - 使用`multiprocessing.Queue`实现进程间通信
+   - 代替了早期版本中的文件通信方式
+   - 提供更低延迟和更可靠的通信
 
-1. 下载最新的BlenderMCP插件ZIP文件
-2. 打开Blender
-3. 进入 编辑 > 首选项 > 插件
-4. 点击 "安装..." 按钮
-5. 选择下载的ZIP文件
-6. 启用插件（勾选复选框）
+## 安装方法
 
-### 使用
+### 依赖条件
 
-1. 打开Blender的3D视图
-2. 在右侧边栏中找到"MCP"选项卡
-3. 点击"启动服务器"按钮
-4. 复制WebSocket URL
-5. 在支持MCP的客户端中使用该URL进行连接
+- Python 3.7+
+- Blender 2.83+
+- `websockets` Python库（用于WebSocket通信）
 
-## 文档
+### 安装步骤
 
-- [安装和使用指南](docs/InstallationGuide.md)
-- [MCP服务器实现](docs/MCPServer.md)
-- [API参考](docs/APIReference.md)
-- [工具开发指南](docs/ToolDevelopment.md)
-- [优化计划](docs/UpdatePlan.md)
+1. 克隆仓库:
+   ```bash
+   git clone https://github.com/yourusername/blendermcp.git
+   cd blendermcp
+   ```
 
-## 系统要求
+2. 安装Python依赖:
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-- Blender 3.0 或更高版本
-- Python 3.7 或更高版本（用于外部MCP服务器）
-- 以下Python包（用于外部MCP服务器）：
-  - websockets >= 12.0
-  - asyncio >= 3.4.3
-  - jsonschema >= 4.17.3
+3. 安装Blender插件:
+   - 启动Blender
+   - 进入 Edit > Preferences > Add-ons
+   - 点击 "Install"，选择 `blendermcp_addon.zip` 文件
+   - 启用插件 "3D View: BlenderMCP"
+
+## 使用方法
+
+### 启动流程
+
+1. **启动Blender并加载BlenderMCP插件**:
+   - 运行Blender
+   - 确保BlenderMCP插件已经启用
+
+2. **在Blender中启动MCP监听器**:
+   - 在Blender界面的侧边栏找到"BlenderMCP"面板
+   - 点击"启动MCP监听器"按钮
+   - 监听器将等待MCP服务器的连接
+
+3. **启动MCP服务器核心**:
+   - 在单独的终端窗口中，运行:
+   ```bash
+   python -m blendermcp.scripts.start_mcp_service --host 127.0.0.1 --port 5000
+   ```
+   - 服务器将通过IPC机制连接到Blender插件
+
+4. **使用MCP客户端连接**:
+   - 使用支持MCP协议的客户端连接到服务器
+   - 连接地址: `ws://127.0.0.1:5000`
+   - 可以调用注册的Blender工具执行操作
+
+## 可用工具
+
+BlenderMCP提供了多种工具函数，用于操作Blender：
+
+### 对象工具
+- `blender.create_cube` - 创建立方体
+- `blender.create_sphere` - 创建球体
+- `blender.create_cylinder` - 创建圆柱体
+- `blender.transform_object` - 变换对象的位置、旋转和缩放
+- `blender.delete_object` - 删除对象
+
+### 场景工具
+- `blender.create_camera` - 创建相机
+- `blender.set_active_camera` - 设置活动相机
+- `blender.create_light` - 创建光源
+
+## 开发指南
+
+### 添加新工具
+
+要添加新的工具，需要遵循以下步骤：
+
+1. 在`src/blendermcp/tools/`目录下创建或修改适当的工具模块
+2. 定义两个函数：
+   - `*_direct`函数：在Blender中直接执行的函数，依赖`bpy`
+   - 异步函数：在服务器端调用，通过IPC转发请求到Blender
+3. 在适当的`register_*_tools`函数中注册工具
+
+例如：
+```python
+# 直接执行函数
+def my_tool_direct(params):
+    # 使用bpy执行操作
+    return {"status": "success", "result": "..."}
+
+# 服务器端函数
+async def my_tool(params):
+    return await request_blender_operation("my_tool", params)
+
+# 注册函数
+def register_tools(adapter):
+    adapter.register_tool(
+        "blender.my_tool",
+        my_tool,
+        "工具描述",
+        [{"name": "param1", "type": "string", "description": "参数描述"}]
+    )
+```
 
 ## 贡献
 
-我们欢迎社区贡献！如果您想参与开发，请查看[贡献指南](CONTRIBUTING.md)。
+欢迎提交Pull Request或Issue帮助改进项目。
 
-## 许可证
+## 许可
 
-本项目采用MIT许可证 - 详情请参阅[LICENSE](LICENSE)文件。
-
-## 支持和反馈
-
-如果您遇到问题或有改进建议，请通过以下方式联系我们：
-
-- 提交GitHub Issue
-- 发送电子邮件至support@blendermcp.org
-- 加入我们的Discord社区
-
-## 致谢
-
-- Blender基金会 - 提供出色的3D创作软件
-- Microsoft - 开发Model Context Protocol规范
-- 所有贡献者和测试者
+MIT License

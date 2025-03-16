@@ -18,14 +18,22 @@ bl_info = {
 import sys
 sys.modules['asyncio'] = None
 
-# 导入必要的模块
-import bpy
+# 尝试导入bpy模块
+try:
+    import bpy
+    HAS_BPY = True
+except ImportError:
+    HAS_BPY = False
+
 import os
 import logging
 import tempfile
 from . import preferences
-from . import panels
 from . import server_operators
+if HAS_BPY:
+    from . import panels
+    from . import tool_viewer
+from . import executor  # 确保导入执行器
 
 # 配置日志
 log_file = os.path.join(tempfile.gettempdir(), "blendermcp_addon.log")
@@ -37,11 +45,12 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("BlenderMCP.Addon")
 
 # 注册和注销函数
 def register():
-    logger.info("注册BlenderMCP插件")
+    """注册所有addon模块"""
+    logger.info("注册BlenderMCP addon模块")
     
     # 注册首选项
     preferences.register()
@@ -49,34 +58,61 @@ def register():
     # 注册服务器操作符
     server_operators.register()
     
-    # 注册面板
-    panels.register()
-    
-    # 自动启动服务器
-    try:
-        addon_prefs = bpy.context.preferences.addons["blendermcp"].preferences
-        if addon_prefs.auto_start:
-            logger.info("自动启动MCP服务器")
-            bpy.ops.mcp.start_server()
-    except Exception as e:
-        logger.error(f"自动启动MCP服务器时出错: {str(e)}", exc_info=True)
+    if HAS_BPY:
+        # 注册面板
+        panels.register()
+        
+        # 注册工具查看器
+        tool_viewer.register()
+        
+        # 初始化执行器
+        executor.initialize()
+        
+        # 自动启动服务器
+        try:
+            addon_prefs = preferences.get_addon_preferences(bpy.context)
+            if addon_prefs.auto_start_server:
+                logger.info("自动启动MCP服务器")
+                mode = addon_prefs.server_mode
+                
+                if mode == 'WEBSOCKET':
+                    host = addon_prefs.websocket_host
+                    port = addon_prefs.websocket_port
+                    server_operators.start_server(mode, host, port)
+                else:
+                    server_operators.start_server(mode)
+        except Exception as e:
+            logger.error(f"自动启动MCP服务器失败: {str(e)}")
+
+    # 启动请求监听器
+    from . import request_listener
+    request_listener.start()
 
 def unregister():
-    logger.info("注销BlenderMCP插件")
+    """注销所有addon模块"""
+    logger.info("注销BlenderMCP addon模块")
     
     # 停止服务器
     if server_operators.is_server_running():
         logger.info("停止MCP服务器")
-        server_operators.stop_mcp_server_process()
+        server_operators.stop_server()
     
-    # 注销面板
-    panels.unregister()
+    if HAS_BPY:
+        # 注销工具查看器
+        tool_viewer.unregister()
+        
+        # 注销面板
+        panels.unregister()
     
     # 注销服务器操作符
     server_operators.unregister()
     
     # 注销首选项
     preferences.unregister()
+
+    # 停止请求监听器
+    from . import request_listener
+    request_listener.stop()
 
 # 允许直接运行脚本
 if __name__ == "__main__":

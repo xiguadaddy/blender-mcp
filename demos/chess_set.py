@@ -230,10 +230,10 @@ async def create_chess_set():
         
         logger.info("国际象棋套装创建完成")
 
-    except Exception as e:
+except Exception as e:
             logger.error(f"创建国际象棋套装时出错: {e}")
             logger.error(traceback.format_exc())
-    finally:
+finally:
             await client.stop()
             logger.info("已断开与Blender的连接")
 

@@ -1,17 +1,39 @@
 """
-BlenderMCP Properties
+BlenderMCP属性模块
 
-This module implements the property groups for the BlenderMCP addon.
+此模块实现了BlenderMCP插件的属性组。
 """
 
-import bpy
-from bpy.types import PropertyGroup
-from bpy.props import (
-    StringProperty,
-    BoolProperty,
-    CollectionProperty,
-    EnumProperty
-)
+try:
+    import bpy
+    from bpy.types import PropertyGroup
+    from bpy.props import (
+        StringProperty,
+        BoolProperty,
+        CollectionProperty,
+        EnumProperty
+    )
+    HAS_BPY = True
+except ImportError:
+    HAS_BPY = False
+    # 在没有bpy模块时创建替代类
+    class PropertyGroup:
+        """替代Blender的PropertyGroup类，用于服务器独立运行时"""
+        def __init__(self):
+            pass
+    
+    # 创建替代属性定义
+    def StringProperty(name="", description="", default=""):
+        return ""
+    
+    def BoolProperty(name="", description="", default=True):
+        return False
+    
+    def CollectionProperty(name="", description="", type=None):
+        return []
+    
+    def EnumProperty(name="", description="", items=None, default=None):
+        return default if default else (items[0][0] if items and len(items) > 0 else "")
 
 class BlenderMCPLogEntry(PropertyGroup):
     """Log entry property group"""
@@ -75,19 +97,20 @@ classes = (
     BlenderMCPProperties,
 )
 
-def register_properties():
-    """注册所有属性类"""
-    for cls in classes:
-        bpy.utils.register_class(cls)
-    
-    # 注册主属性组
-    bpy.types.Scene.blendermcp = bpy.props.PointerProperty(type=BlenderMCPProperties)
+def register():
+    """注册属性"""
+    if HAS_BPY:
+        bpy.utils.register_class(BlenderMCPLogEntry)
+        bpy.utils.register_class(BlenderMCPProperties)
+        
+        # 添加到Scene
+        bpy.types.Scene.blendermcp = bpy.props.PointerProperty(type=BlenderMCPProperties)
 
-def unregister_properties():
-    """注销所有属性类"""
-    # 删除主属性组
-    del bpy.types.Scene.blendermcp
-    
-    # 注销类（按照注册的相反顺序）
-    for cls in reversed(classes):
-        bpy.utils.unregister_class(cls) 
+def unregister():
+    """注销属性"""
+    if HAS_BPY:
+        # 删除从Scene
+        del bpy.types.Scene.blendermcp
+        
+        bpy.utils.unregister_class(BlenderMCPProperties)
+        bpy.utils.unregister_class(BlenderMCPLogEntry) 
